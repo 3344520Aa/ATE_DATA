@@ -64,21 +64,12 @@
             <th>Bin</th>
             <th>Name</th>
             <th v-for="s in options.selected_sites" :key="s">Site{{ s }}</th>
-            <th class="sortable" @click="toggleBinSort">
-              All Site
-              <span v-if="binSortOrder === 'asc'">↑</span>
-              <span v-else-if="binSortOrder === 'desc'">↓</span>
-              <span v-else>⇅</span>
-            </th>
+            <th>All Site</th>
             <th>% of total</th>
-            <th>Comment</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-if="options.selected_sites.length === 0">
-            <td :colspan="5 + options.selected_sites.length" style="text-align:center;color:#999;padding:20px">No sites selected</td>
-          </tr>
-          <tr v-else v-for="b in sortedBins" :key="b.bin_number" :class="{ 'pass-row': isPassBin(b.bin_number) }">
+          <tr v-for="b in binData.bins" :key="b.bin_number" :class="{ 'pass-row': isPassBin(b.bin_number) }">
             <td>
               <span class="bin-link" @click="openBinDetail(b.bin_number, b.bin_name)">{{ b.bin_number }}</span>
             </td>
@@ -88,35 +79,26 @@
             </td>
             <td>{{ b.all_site_count }}</td>
             <td>{{ b.all_site_pct?.toFixed(2) }}%</td>
-            <td>
-              <input type="text" v-model="b.comment" @blur="saveComment(b)" placeholder="" 
-              style="width: 400px; padding: 2px 4px; border: none; outline: none; background: transparent; font-size: 12px;"/>
-            </td>
           </tr>
         </tbody>
         <tfoot>
           <tr class="summary-row">
             <td colspan="2">Passes</td>
-            <td v-for="s in options.selected_sites" :key="s">
-              {{ getSitePass(s) }} ({{ getSiteTotal(s) > 0 ? (getSitePass(s) / getSiteTotal(s) * 100).toFixed(2) + '%' : '-' }})
-            </td>
+            <td v-for="s in options.selected_sites" :key="s">{{ getSitePass(s) }}</td>
             <td>{{ getTotalPass() }}</td>
             <td>{{ getTotalAll() > 0 ? (getTotalPass() / getTotalAll() * 100).toFixed(2) + '%' : '-' }}</td>
-            <td></td>
           </tr>
           <tr class="summary-row">
             <td colspan="2">Fails</td>
             <td v-for="s in options.selected_sites" :key="s">{{ getSiteFail(s) }}</td>
             <td>{{ getTotalFail() }}</td>
             <td>{{ getTotalAll() > 0 ? (getTotalFail() / getTotalAll() * 100).toFixed(2) + '%' : '-' }}</td>
-            <td></td>
           </tr>
           <tr class="summary-row">
             <td colspan="2">Sum</td>
             <td v-for="s in options.selected_sites" :key="s">{{ getSiteTotal(s) }}</td>
             <td>{{ getTotalAll() }}</td>
             <td>100.00%</td>
-            <td></td>
           </tr>
         </tfoot>
       </table>
@@ -128,8 +110,8 @@
       <div class="map-section">
         <div class="section-title">Bin Map</div>
         <div class="map-with-legend">
-          <canvas ref="binMapCanvas" width="800" height="800"
-            style="width:800px;height:800px;border:1px solid #eee;flex-shrink:0"></canvas>
+          <canvas ref="binMapCanvas" width="480" height="520"
+            style="width:480px;height:520px;border:1px solid #eee;flex-shrink:0"></canvas>
           <div class="bin-legend">
             <div :class="['bin-icon', { selected: selectedBin === null }]"
               @click="selectedBin = null; renderBinMap()">
@@ -254,8 +236,6 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import * as echarts from 'echarts'
 import api from '@/api'
-import ExcelJS from 'exceljs'
-import { saveAs } from 'file-saver'
 
 const route = useRoute()
 const lotId = ref(Number(route.params.id))
@@ -271,7 +251,6 @@ const binData = ref<any>({ bins: [], sites: [], all_sites: [] })
 const allSites = ref<number[]>([])
 const passBins = ref<number[]>([])
 const selectedBin = ref<number | null>(null)
-const binSortOrder = ref<'asc' | 'desc' | ''>('')
 const retestData = ref<any>(null)
 const retestExpanded = ref(false)
 const hasCoords = ref(false)
@@ -301,9 +280,9 @@ function getBinColor(binNum: number): string {
   if (isPassBin(binNum)) return '#69db7c'
   if (!BIN_COLORS[binNum]) {
     const idx = Object.keys(BIN_COLORS).length % FAIL_COLORS.length
-    BIN_COLORS[binNum] = FAIL_COLORS[idx] as string
+    BIN_COLORS[binNum] = FAIL_COLORS[idx]
   }
-  return BIN_COLORS[binNum] as string
+  return BIN_COLORS[binNum]
 }
 
 function isPassBin(binNum: number): boolean {
@@ -316,30 +295,6 @@ const failBins = computed(() => {
     .filter((b: any) => !isPassBin(b.bin_number))
     .sort((a: any, b: any) => b.all_site_count - a.all_site_count)
 })
-
-const sortedBins = computed(() => {
-  if (!binData.value?.bins) return []
-  const bins = [...binData.value.bins]
-  
-  if (binSortOrder.value === 'desc') {
-    bins.sort((a, b) => b.all_site_count - a.all_site_count)
-  } else if (binSortOrder.value === 'asc') {
-    bins.sort((a, b) => a.all_site_count - b.all_site_count)
-  } else {
-    bins.sort((a, b) => a.bin_number - b.bin_number)
-  }
-  return bins
-})
-
-function toggleBinSort() {
-  if (binSortOrder.value === '') {
-    binSortOrder.value = 'desc'
-  } else if (binSortOrder.value === 'desc') {
-    binSortOrder.value = 'asc'
-  } else {
-    binSortOrder.value = ''
-  }
-}
 
 const isAllSiteSelected = computed(() =>
   allSites.value.length > 0 &&
@@ -358,6 +313,7 @@ function toggleAllSite() {
 function toggleSite(site: number) {
   const idx = options.value.selected_sites.indexOf(site)
   if (idx >= 0) {
+    if (options.value.selected_sites.length === 1) return // 至少保留一个
     options.value.selected_sites.splice(idx, 1)
   } else {
     options.value.selected_sites.push(site)
@@ -502,16 +458,10 @@ watch(retestExpanded, async (val) => {
 // ── Bin Map ───────────────────────────────────────────
 function renderBinMap() {
   const canvas = binMapCanvas.value
-  if (!canvas) return
-  
-  if (!mapCache.value.length) {
-    const ctx = canvas.getContext('2d')
-    if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height)
-    return
-  }
+  if (!canvas || !mapCache.value.length) return
 
   // Site过滤
-  const data = mapCache.value
+  let data = mapCache.value
   if (options.value.selected_sites.length < allSites.value.length) {
     // 需要按site过滤，但mapCache没有site信息，需要从parquet读
     // 暂时显示全部
@@ -533,36 +483,23 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
   const ctx = canvas.getContext('2d')
   if (!ctx || !data.length) return
 
-  // 使用更稳健的方法计算 min/max，避免大型数组 ... 展开导致的栈溢出
-  let minX = Infinity, maxX = -Infinity
-  let minY = Infinity, maxY = -Infinity
-  for (const d of data) {
-    if (d.x < minX) minX = d.x
-    if (d.x > maxX) maxX = d.x
-    if (d.y < minY) minY = d.y
-    if (d.y > maxY) maxY = d.y
-  }
+  const xs = data.map(d => d.x), ys = data.map(d => d.y)
+  const minX = Math.min(...xs), maxX = Math.max(...xs)
+  const minY = Math.min(...ys), maxY = Math.max(...ys)
 
   const rotated = data.map(d => {
     const r = applyRotation(d.x, d.y, minX, maxX, minY, maxY)
     return { ...d, rx: r.x, ry: r.y }
   })
 
-  let rMinX = Infinity, rMaxX = -Infinity
-  let rMinY = Infinity, rMaxY = -Infinity
-  for (const d of rotated) {
-    if (d.rx < rMinX) rMinX = d.rx
-    if (d.rx > rMaxX) rMaxX = d.rx
-    if (d.ry < rMinY) rMinY = d.ry
-    if (d.ry > rMaxY) rMaxY = d.ry
-  }
+  const rxs = rotated.map(d => d.rx), rys = rotated.map(d => d.ry)
+  const rMinX = Math.min(...rxs), rMaxX = Math.max(...rxs)
+  const rMinY = Math.min(...rys), rMaxY = Math.max(...rys)
 
-  const W = canvas.width, H = canvas.height, margin = 30
-  const gridW = rMaxX - rMinX + 1
-  const gridH = rMaxY - rMinY + 1
-  const cellW = (W - margin * 2) / gridW
-  const cellH = (H - margin * 2) / gridH
-  const cellSize = Math.max(0.5, Math.min(cellW, cellH) - 0.5)
+  const W = canvas.width, H = canvas.height, margin = 24
+  const cellW = (W - margin * 2) / (rMaxX - rMinX + 1)
+  const cellH = (H - margin * 2) / (rMaxY - rMinY + 1)
+  const cellSize = Math.min(cellW, cellH) - 0.5
 
   ctx.clearRect(0, 0, W, H)
 
@@ -617,12 +554,10 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
 
 // ── Yield Plot（12区域晶圆良率图）───────────────────────
 function renderYieldPlot() {
-  if (!options.value.show_yield_plot) return
-  nextTick(() => {
-    const canvas = yieldPlotCanvas.value
-    if (!canvas || !mapCache.value.length) return
+  const canvas = yieldPlotCanvas.value
+  if (!canvas || !mapCache.value.length) return
 
-    const data = mapCache.value
+  const data = mapCache.value
   const xs = data.map(d => d.x), ys = data.map(d => d.y)
   const minX = Math.min(...xs), maxX = Math.max(...xs)
   const minY = Math.min(...ys), maxY = Math.max(...ys)
@@ -645,8 +580,8 @@ function renderYieldPlot() {
     const ringIdx = Math.min(Math.floor(r / maxR * rings), rings - 1)
     const sectorIdx = Math.floor(((angle + Math.PI) / (2 * Math.PI)) * sectors) % sectors
 
-    zones[ringIdx]![sectorIdx]!.total++
-    if (isPassBin(d.bin)) zones[ringIdx]![sectorIdx]!.pass++
+    zones[ringIdx][sectorIdx].total++
+    if (isPassBin(d.bin)) zones[ringIdx][sectorIdx].pass++
   })
 
   const ctx = canvas.getContext('2d')
@@ -664,7 +599,7 @@ function renderYieldPlot() {
     for (let si = 0; si < sectors; si++) {
       const startAngle = (si / sectors) * 2 * Math.PI - Math.PI / 2
       const endAngle = ((si + 1) / sectors) * 2 * Math.PI - Math.PI / 2
-      const zone = zones[ri]![si]!
+      const zone = zones[ri][si]
       const yield_ = zone.total > 0 ? zone.pass / zone.total : 0
 
       // 颜色：低良率红→高良率绿
@@ -693,84 +628,31 @@ function renderYieldPlot() {
       ctx.fillText((yield_ * 100).toFixed(1) + '%', tx, ty)
     }
   }
-  })
 }
 
 // ── Fail Bin 柱状图 ───────────────────────────────────
 function renderFailBinChart() {
-  if (!options.value.show_fail_bin) {
-    if (failBinChart) {
-      failBinChart.dispose()
-      failBinChart = null
-    }
-    return
-  }
+  if (!options.value.show_fail_bin) return
   nextTick(() => {
-    if (!failBinChartRef.value) return
-    
-    failBinChart = echarts.getInstanceByDom(failBinChartRef.value) as echarts.ECharts | null
-    if (!failBinChart) {
+    if (!failBinChart && failBinChartRef.value) {
       failBinChart = echarts.init(failBinChartRef.value)
     }
-    
-    // 获取失败的 Bin 并按数量降序排列 (Pareto)
     const failBinList = binData.value.bins.filter((b: any) => !isPassBin(b.bin_number))
-    failBinList.sort((a: any, b: any) => b.all_site_count - a.all_site_count)
-    
-    // 计算累加百分比 (相对于总测试 Die 数，包含起始良率，最终累加至 100%)
-    const totalDies = getTotalAll()
-    const totalPass = getTotalPass()
-    let cumulativeCount = totalPass // 初始累加量等于 Pass Die 数量 (即良率基数)
-
-    const cumulativePctList = failBinList.map((b: any) => {
-      cumulativeCount += b.all_site_count
-      return totalDies > 0 ? (cumulativeCount / totalDies * 100).toFixed(2) : 0
-    })
-
     failBinChart?.setOption({
-      title: { text: 'Fail Bin Analysis (Pareto)', left: 'center', textStyle: { fontSize: 12 } },
-      tooltip: { 
-        trigger: 'axis',
-        formatter: function (params: any) {
-          let html = params[0].name + '<br/>';
-          params.forEach((param: any) => {
-            if (param.seriesType === 'bar') {
-              html += `${param.marker} Count: ${param.value}<br/>`;
-            } else if (param.seriesType === 'line') {
-              html += `${param.marker} Cumulative Yield: ${param.value}%<br/>`;
-            }
-          });
-          return html;
-        }
-      },
-      legend: { data: ['Count', 'Cumulative Yield %'], bottom: 0 },
+      title: { text: 'Fail Bin Analysis', left: 'center', textStyle: { fontSize: 12 } },
+      tooltip: { trigger: 'axis' },
       xAxis: {
         type: 'category',
         data: failBinList.map((b: any) => `Bin${b.bin_number}\n${b.bin_name}`),
         axisLabel: { rotate: 45, fontSize: 10 }
       },
-      yAxis: [
-        { type: 'value', name: 'Count' },
-        { type: 'value', name: 'Cumulative Yield (%)', min: (totalDies > 0 ? Math.floor(totalPass / totalDies * 100) : 0), max: 100, axisLabel: { formatter: '{value} %' } }
-      ],
-      series: [
-        {
-          name: 'Count',
-          type: 'bar',
-          data: failBinList.map((b: any) => b.all_site_count),
-          itemStyle: { color: (params: any) => getBinColor(failBinList[params.dataIndex].bin_number) },
-          label: { show: true, position: 'insideTop', fontSize: 10, color: '#000' }
-        },
-        {
-          name: 'Cumulative Yield %',
-          type: 'line',
-          yAxisIndex: 1,
-          data: cumulativePctList,
-          itemStyle: { color: '#FF4500' },
-          symbolSize: 6,
-          label: { show: true, position: 'top', formatter: '{c}%', fontSize: 10 }
-        }
-      ]
+      yAxis: { type: 'value', name: 'Count' },
+      series: [{
+        type: 'bar',
+        data: failBinList.map((b: any) => b.all_site_count),
+        itemStyle: { color: (params: any) => getBinColor(failBinList[params.dataIndex].bin_number) },
+        label: { show: true, position: 'top', fontSize: 10 }
+      }]
     })
   })
 }
@@ -778,17 +660,6 @@ function renderFailBinChart() {
 function toggleBinHighlight(binNum: number) {
   selectedBin.value = selectedBin.value === binNum ? null : binNum
   renderBinMap()
-}
-
-async function saveComment(bin: any) {
-  try {
-    await api.post(`/analysis/lot/${lotId.value}/bin_comment`, {
-      bin_number: bin.bin_number,
-      comment: bin.comment || ''
-    })
-  } catch (e) {
-    console.error('Failed to save comment', e)
-  }
 }
 
 async function openBinDetail(binNum: number, binName: string) {
@@ -826,157 +697,8 @@ function directionLabel(direction: string, noChange: boolean) {
   return 'Pass→Pass'
 }
 
-async function handleExport() {
-  if (!lotInfo.value) return
-
-  const workbook = new ExcelJS.Workbook()
-  workbook.creator = 'Chip ATE System'
-  const sheet = workbook.addWorksheet('Bin Summary')
-
-  // 1. 写头部信息 (Lot Info)
-  const headerData = [
-    ['Lot Information', ''],
-    ['Name', lotInfo.value.filename || ''],
-    ['Program', lotInfo.value.program || ''],
-    ['Test Machine', lotInfo.value.test_machine || ''],
-    ['Station Count', lotInfo.value.station_count || ''],
-    ['Die Count', lotInfo.value.die_count || ''],
-    ['Yield Rate', lotInfo.value.yield_rate ? (lotInfo.value.yield_rate * 100).toFixed(2) + '%' : '-'],
-    ['Data Type', lotInfo.value.data_type || ''],
-    ['Test Date', lotInfo.value.test_date ? new Date(lotInfo.value.test_date).toLocaleString() : '']
-  ]
-  
-  headerData.forEach(row => {
-    sheet.addRow(row)
-  })
-  
-  sheet.addRow([]) // 空行分隔
-
-  // 2. 写表头
-  const sites = options.value.selected_sites
-  const tableHeader = ['Bin', 'Name', ...sites.map(s => `Site${s}`), 'All Site', '% of total', 'Comment']
-  const headerRow = sheet.addRow(tableHeader)
-  headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } }
-  headerRow.fill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FF808080' } // 灰色背景
-  }
-
-  // 3. 写表格数据
-  const bins = sortedBins.value
-  bins.forEach((b: any) => {
-    const rowData = [
-      b.bin_number,
-      b.bin_name,
-      ...sites.map(s => b.sites[`site${s}`]?.count ?? 0),
-      b.all_site_count,
-      (b.all_site_pct ?? 0).toFixed(2) + '%',
-      b.comment || ''
-    ]
-    const row = sheet.addRow(rowData)
-    row.alignment = { horizontal: 'center', vertical: 'middle' };
-    if (isPassBin(b.bin_number)) {
-      row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6FFE6' } } // 浅绿
-    }
-  })
-
-  // 写 Summary 行 (Passes, Fails, Sum)
-  const passRow = sheet.addRow(['Passes', '', ...sites.map(s => getSitePass(s)), getTotalPass(), (getTotalAll() > 0 ? (getTotalPass() / getTotalAll() * 100).toFixed(2) + '%' : '-'), ''])
-  passRow.font = { bold: true }
-  
-  const failRow = sheet.addRow(['Fails', '', ...sites.map(s => getSiteFail(s)), getTotalFail(), (getTotalAll() > 0 ? (getTotalFail() / getTotalAll() * 100).toFixed(2) + '%' : '-'), ''])
-  failRow.font = { bold: true }
-  
-  const sumRow = sheet.addRow(['Sum', '', ...sites.map(s => getSiteTotal(s)), getTotalAll(), '100.00%', ''])
-  sumRow.font = { bold: true }
-
-  // 设置列宽
-  sheet.columns.forEach(col => {
-    col.width = 15
-  })
-
-  // 4. 添加 Map 图像和图例 (合成一张图)
-  if (binMapCanvas.value && options.value.selected_sites.length > 0) {
-    // 获取需要显示的 Bin 图例
-    const visibleBins = bins.filter((b: any) => {
-      return sites.reduce((sum, s) => sum + (b.sites[`site${s}`]?.count ?? 0), 0) > 0
-    })
-
-    const mapWidth = binMapCanvas.value.width
-    const mapHeight = binMapCanvas.value.height
-    
-    // 图例占据的宽度
-    const legendWidth = 220
-    // 根据可见的 Bin 数量计算需要的高度
-    const legendHeight = visibleBins.length * 20 + 40
-    
-    const compositeWidth = mapWidth + legendWidth
-    const compositeHeight = Math.max(mapHeight, legendHeight)
-
-    // 创建离屏 Canvas
-    const offCanvas = document.createElement('canvas')
-    offCanvas.width = compositeWidth
-    offCanvas.height = compositeHeight
-    const ctx = offCanvas.getContext('2d')
-
-    if (ctx) {
-      // 填充白色背景
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, compositeWidth, compositeHeight)
-
-      // 左侧画 Map
-      ctx.drawImage(binMapCanvas.value, 0, 0)
-
-      // 右侧画图例
-      const startX = mapWidth + 10
-      let startY = 30
-      ctx.font = '14px sans-serif'
-      ctx.textAlign = 'left'
-      ctx.textBaseline = 'middle'
-
-      visibleBins.forEach((b: any) => {
-        const currentCount = sites.reduce((sum, s) => sum + (b.sites[`site${s}`]?.count ?? 0), 0)
-        const color = getBinColor(b.bin_number)
-
-        // 画圆点
-        ctx.beginPath()
-        ctx.arc(startX + 6, startY, 5, 0, 2 * Math.PI)
-        ctx.fillStyle = color
-        ctx.fill()
-
-        // 画文字
-        ctx.fillStyle = '#333'
-        ctx.fillText(`Bin${b.bin_number}(${currentCount})`, startX + 16, startY)
-
-        startY += 24
-      })
-
-      // 将拼接后的 Canvas 转换为 Base64
-      const mapDataUrl = offCanvas.toDataURL('image/png')
-      
-      // 向 Workbook 添加图片资源
-      const imageId = workbook.addImage({
-        base64: mapDataUrl,
-        extension: 'png',
-      })
-      
-      // 计算插入位置：在表格下方隔两行
-      const imageStartRow = sheet.lastRow ? sheet.lastRow.number + 2 : 1
-      
-      // 在指定位置插入图片 (这里以单元格为基准放置)
-      sheet.addImage(imageId, {
-        tl: { col: 0.5, row: imageStartRow }, // 略微缩进，放在A列偏右
-        ext: { width: compositeWidth, height: compositeHeight }    // 设置图片大小
-      })
-    }
-  }
-
-  // 5. 导出文件
-  const buffer = await workbook.xlsx.writeBuffer()
-  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-  const filename = `${lotInfo.value.filename || 'BinReport'}_${new Date().getTime()}.xlsx`
-  saveAs(blob, filename)
+function handleExport() {
+  alert('导出功能开发中')
 }
 
 onMounted(async () => {
@@ -995,7 +717,6 @@ onMounted(async () => {
   flex-direction: column;
   gap: 10px;
   padding-bottom: 20px;
-  width: 100%;
 }
 
 .sortable {
@@ -1032,7 +753,7 @@ onMounted(async () => {
 .opt-label { color: #666; font-weight: 500; white-space: nowrap; }
 
 .export-btn {
-  margin-left: 100px;
+  margin-left: auto;
   background: white;
   border: 1px solid #d9d9d9;
   border-radius: 4px;
@@ -1047,22 +768,14 @@ onMounted(async () => {
   padding: 12px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
   overflow-x: auto;
-  width: 100%; /* 关键：容器宽度根据表格内容自适应 */
-  max-width: 100%;    /* 关键：防止超出屏幕 */
 }
 
-.bin-table { 
-  /* width: 100%;  */
-  border-collapse: collapse; 
-  font-size: 12px; 
-  table-layout: auto; /* 关键：让浏览器根据内容自动计算列宽 */
-}
+.bin-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .bin-table th, .bin-table td {
-border: 1px solid #f0f0f0;
-  padding: 5px 12px; /* 增加一点左右内边距提升可读性 */
+  border: 1px solid #f0f0f0;
+  padding: 5px 10px;
   text-align: center;
-  white-space: nowrap; /* 保持文字不换行 */
-  min-width: 60px;     /* 关键：设置最小宽度防止太挤 */
+  white-space: nowrap;
 }
 .bin-table th { background: #fafafa; color: #666; }
 .pass-row { background: #f6ffed; }
@@ -1089,7 +802,7 @@ border: 1px solid #f0f0f0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: 800px;
+  max-height: 520px;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -1097,19 +810,19 @@ border: 1px solid #f0f0f0;
 .bin-icon {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 4px;
+  gap: 4px;
+  padding: 1px 4px;
   border-radius: 3px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 10px;
   white-space: nowrap;
 }
 .bin-icon.selected { background: #e6f7ff; }
 .bin-icon:hover { background: #f5f5f5; }
 
 .bin-dot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }

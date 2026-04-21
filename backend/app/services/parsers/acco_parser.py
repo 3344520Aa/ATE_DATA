@@ -31,6 +31,7 @@ parse_acco.py  —  通用 ACCO/STS8200/STS8300/T2K/TMT/ETS364 数据解析器
 import re
 import os
 import pandas as pd
+from datetime import datetime
 from typing import Optional
 from app.services.parsers.base import ParsedData
 
@@ -57,8 +58,11 @@ META_KEYS: dict[str, list[str]] = {
     'handler': [
         '[HandlerID]', 'Handler:', 'Handler/Prober ID,',
     ],
+    'test_date_raw': [
+        '[TestDate]', 'Date:', 'TestDate:', '测试日期:', '测试日期',
+    ],
     'beginning_time': [
-        '[Beginning Time]', 'Beginning Time:', 'BeginningTime:',
+        '[Beginning Time]', 'Beginning Time:', 'BeginningTime:', 'Beginning:', 'Beginning', 'Beginning 测试日期', 'Beginning   测试日期'
     ],
     'ending_time': [
         '[Ending Time]', 'Ending Time:', 'EndingTime:',
@@ -70,10 +74,10 @@ META_KEYS: dict[str, list[str]] = {
 
 # 关键列的多名映射 → 标准列名
 COL_ALIASES: dict[str, list[str]] = {
-    'SITE_NUM': ['SITE_NUM', 'SITE', 'Site #'],
-    'SOFT_BIN': ['SOFT_BIN', 'BIN', 'Bin'],
-    'X_COORD':  ['X_COORD', 'X', 'XCoord'],
-    'Y_COORD':  ['Y_COORD', 'Y', 'YCoord'],
+    'SITE_NUM': ['SITE_NUM', 'SITE', 'Site #', 'Site', 'SiteNum'],
+    'SOFT_BIN': ['SOFT_BIN', 'BIN', 'Bin', 'Soft Bin', 'SBin', 'HBin', 'S-Bin', 'H-Bin'],
+    'X_COORD':  ['X_COORD', 'X', 'XCoord', 'X_Coord', 'X-Coord', 'Coordinate X', 'X_POS'],
+    'Y_COORD':  ['Y_COORD', 'Y', 'YCoord', 'Y_Coord', 'Y-Coord', 'Coordinate Y', 'Y_POS'],
     'SERIAL':   ['SERIAL', 'Serial #'],
 }
 
@@ -95,6 +99,116 @@ _FILENAME_SKIP_TOKENS = {
 # ══════════════════════════════════════════════════════════════════════════════
 # 工具函数
 # ══════════════════════════════════════════════════════════════════════════════
+
+# 测试时间解析：支持的时间格式列表（精确时间 > 仅日期）
+_DATETIME_FMTS = [
+    '%Y-%m-%d %H:%M:%S',      # 2025-03-18 17:28:07
+    '%Y-%m-%d %I:%M:%S %p',   # 2025-3-18 5:28:07 PM
+    '%Y-%m-%d %H:%M',         # 2026/3/23 11:25  (分隔符归一化后)
+    '%Y/%m/%d %H:%M:%S',
+    '%Y/%m/%d %H:%M',
+    '%Y/%m/%d',
+    '%Y-%m-%d',
+    '%Y-%m-%dT%H:%M:%S',      # ISO 8601
+    '%Y/%m/%d %I:%M:%S %p',
+    '%m/%d/%Y %H:%M:%S',      # 月/日/年
+    '%m/%d/%Y %I:%M:%S %p',
+    '%m/%d/%Y',
+    '%m-%d-%Y',
+    '%Y%m%d%H%M%S',           # 纯数字 20250314114627
+    '%Y%m%d',
+]
+
+
+def _parse_datetime_str(raw: str) -> Optional[str]:
+    """
+    尝试将任意格式的时间字符串解析为标准格式。
+    返回 'YYYY-MM-DD HH:MM:SS'（精确时间）或 'YYYY-MM-DD'（仅日期）。
+    """
+    if not raw:
+        return None
+    
+    # 去除尾部的 .数字（毫秒/秒小数，如 22:42:17.0）
+    s = re.sub(r'\.\d+$', '', raw.strip())
+    
+    # 统一分隔符：日期部分 / → -
+    s = s.replace('/', '-')
+    
+    # 规范化月日（补前导零），处理 YYYY-M-D 或 M-D-YYYY
+    # 先处理 YYYY-M-D
+    s = re.sub(
+        r'^(\d{4})-(\d{1,2})-(\d{1,2})',
+        lambda m: f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}",
+        s
+    )
+    # 处理 M-D-YYYY
+    s = re.sub(
+        r'^(\d{1,2})-(\d{1,2})-(\d{4})',
+        lambda m: f"{int(m.group(1)):02d}-{int(m.group(2)):02d}-{m.group(3)}",
+        s
+    )
+
+    # 规范化 12 小时制： 5:28:07 PM → 17:28:07
+    pm_match = re.search(r'(\d{1,2}):(\d{2})(:(\d{2}))?\s*(AM|PM)$', s, re.IGNORECASE)
+    if pm_match:
+        h, m_val, _, sec, period = pm_match.groups()
+        h = int(h)
+        if period.upper() == 'PM' and h != 12:
+            h += 12
+        elif period.upper() == 'AM' and h == 12:
+            h = 0
+        sec_str = f":{sec}" if sec else ":00"
+        s = s[:pm_match.start()] + f"{h:02d}:{m_val}{sec_str}"
+
+    for fmt in _DATETIME_FMTS:
+        try:
+            dt = datetime.strptime(s, fmt)
+            # 如果格式中包含时间部分，返回完整格式
+            if any(x in fmt for x in ('%H', '%I', '%M', '%p')):
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+            return dt.strftime('%Y-%m-%d')
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_date_from_filename(filename: str) -> Optional[str]:
+    """
+    从文件名（去扩展名）末尾提取测试时间戳。
+    
+    规则：
+      1. 找文件名末尾的纯数字 token（至少 8 位为日期，最多 14 位为日期时间）。
+      2. 兼容 YYYYMMDDHHMMSS, YYYYMMDD, MMDDYYYY。
+      3. 兼容 Time_Date 模式（如 114627_20250314）。
+    """
+    name = os.path.splitext(os.path.basename(filename))[0]
+    tokens = re.split(r'[_\-\s]+', name)
+    
+    # 逆序评估候选者
+    for i in range(len(tokens) - 1, -1, -1):
+        tok = tokens[i]
+        
+        # 情况 A: 14位 (YYYYMMDDHHMMSS)
+        if len(tok) == 14 and tok.isdigit():
+            res = _parse_datetime_str(tok)
+            if res: return res
+            
+        # 情况 B: 8位 (YYYYMMDD 或 MMDDYYYY)
+        if len(tok) == 8 and tok.isdigit():
+            # 尝试 YYYYMMDD
+            if 1990 <= int(tok[:4]) <= 2100:
+                # 检查前面是否紧跟 6 位时间 token (HHMMSS)
+                if i > 0 and len(tokens[i-1]) == 6 and tokens[i-1].isdigit():
+                    res = _parse_datetime_str(tok + tokens[i-1])
+                    if res: return res
+                return _parse_datetime_str(tok)
+            # 尝试 MMDDYYYY
+            if 1990 <= int(tok[4:]) <= 2100:
+                reordered = tok[4:] + tok[:4]
+                return _parse_datetime_str(reordered)
+                
+    return None
+
 
 def _nonblank_count(line: str) -> int:
     """统计一行中非空列数"""
@@ -193,17 +307,30 @@ def _extract_meta(header_lines: list[str]) -> dict[str, Optional[str]]:
                 continue
             for kv in key_variants:
                 kv_clean = kv.rstrip(',')
-                if not c0.upper().startswith(kv_clean.upper()):
+                
+                # Check if keyword is in c0
+                kv_upper = kv_clean.upper()
+                c0_upper = c0.upper()
+                if kv_upper not in c0_upper:
                     continue
 
-                # 优先从第1列取值；冒号风格从 c0 内取
                 value = c1
                 if not value:
-                    colon_pos = stripped.find(':')
-                    if colon_pos > 0:
-                        value = stripped[colon_pos + 1:].split(',')[0].strip()
+                    # Look for value right after the keyword in the same cell
+                    idx = c0_upper.find(kv_upper)
+                    remainder = c0[idx + len(kv_clean):].strip()
+                    if remainder.startswith(':'):
+                        remainder = remainder[1:].strip()
+                    
+                    if remainder:
+                        value = remainder
+                    else:
+                        colon_pos = stripped.find(':')
+                        if colon_pos > 0:
+                            value = stripped[colon_pos + 1:].split(',')[0].strip()
+                            
                 if not value:
-                    break
+                    continue
 
                 # 字段专属后处理
                 if field == 'program':
@@ -407,17 +534,48 @@ def parse_acco(filepath: str, tester: str) -> ParsedData:
     result.ending_time    = meta.get('ending_time')
     result.handler        = meta.get('handler')
 
-    # SBin 定义（兼容逗号分隔和空格分隔）
+    # ── 测试时间综合提取 ─────────────────────────────────────────
+    # 优先级：数据中的精确时间 > 数据中的日期 > 文件名中的时间戳
+    _test_date_str: Optional[str] = None
+
+    # 1) 尝试 Beginning Time（已提取到 result.beginning_time）
+    if result.beginning_time:
+        _test_date_str = _parse_datetime_str(result.beginning_time)
+
+    # 2) 尝试 [TestDate] / Date: 字段
+    if not _test_date_str:
+        raw_td = meta.get('test_date_raw')
+        if raw_td:
+            _test_date_str = _parse_datetime_str(raw_td)
+
+    # 3) 文件名兜底
+    if not _test_date_str:
+        _test_date_str = _extract_date_from_filename(filepath)
+
+    # 4) 如果 beginning_time 只有日期但文件名有精确时间，用文件名补充时间
+    if _test_date_str and len(_test_date_str) == 10:  # 仅日期
+        fn_dt = _extract_date_from_filename(filepath)
+        if fn_dt and len(fn_dt) == 19:  # 文件名有精确时间
+            # 验证日期部分是否一致，不一致则保留数据内日期
+            if fn_dt[:10] == _test_date_str:
+                _test_date_str = fn_dt
+
+    result.test_date = _test_date_str
+    print(f"[parser] test_date={result.test_date}  "
+          f"(beginning_time={result.beginning_time!r}, "
+          f"test_date_raw={meta.get('test_date_raw')!r})")
+
+    # SBin 定义（兼容逗号分隔和空格分隔，同时支持 Bin 名称中包含空格）
     _sbin_re = re.compile(
-        r'SBin$$(\d+)$$[\s,]+(\S*?)[\s,]+\d+[\s,]+[\d.]+%[\s,]*(\d*)',
+        r'SBin\[(\d+)\][\s,]+(.*?)(?:[\s,]+\d+[\s,]+[\d.]+%[\s,]*\d*)',
         re.IGNORECASE
     )
     for line in header_lines:
-        m = _sbin_re.search(line)
+        m = _sbin_re.search(line.strip())
         if m:
             result.bin_definitions[int(m.group(1))] = {
-                'name':     m.group(2) or None,
-                'hard_bin': int(m.group(3)) if m.group(3) else None,
+                'name':     m.group(2).strip() or None,
+                'hard_bin': None, # hard_bin is not reliably present in all formats
             }
 
     # ── 3. 列头行识别与列名标准化 ─────────────────────────────────
@@ -581,7 +739,13 @@ def parse_acco(filepath: str, tester: str) -> ParsedData:
     final_cols = ['SITE_NUM', 'SOFT_BIN']
     if has_coords:
         final_cols += ['X_COORD', 'Y_COORD']
+        
     final_cols += [p for p in result.param_names if p in df.columns]
     result.data = df[final_cols]
+
+    if has_coords:
+        result.data = result.data[result.data['X_COORD'].abs() <= 999]
+
+    
 
     return result

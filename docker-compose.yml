@@ -1,17 +1,21 @@
-version: '3'
 services:
   db:
     image: ankane/pgvector:latest
     container_name: chip_db
     restart: always
     environment:
-      POSTGRES_DB: chip_data
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: 3344520Qq
+      POSTGRES_DB: ${POSTGRES_DB:-chip_data}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-3344520Qq}
     ports:
       - "5432:5432"
     volumes:
       - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-chip_data}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -22,17 +26,52 @@ services:
     volumes:
       - ./redis_data:/data
     command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  grafana:
-    image: grafana/grafana:latest
-    container_name: chip_grafana
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: chip_backend
     restart: always
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./grafana_data:/var/lib/grafana
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://admin:3344520Qq@db:5432/chip_data}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      SECRET_KEY: ${SECRET_KEY:-chip-ate-analysis-system-secret-key-2026}
+      APP_ENV: ${APP_ENV:-production}
+      DEBUG: "false"
+      UPLOAD_DIR: ${UPLOAD_DIR:-/app/uploads}
+      MAX_USER_STORAGE_GB: ${MAX_USER_STORAGE_GB:-10}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - uploads_data:/app/uploads
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: chip_frontend
+    restart: always
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+    environment:
+      - BACKEND_URL=http://backend:8000
+
+volumes:
+  uploads_data:
 
 networks:
   default:

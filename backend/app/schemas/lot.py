@@ -23,6 +23,7 @@ class LotResponse(BaseModel):
     upload_date: Optional[datetime]
     finish_date: Optional[datetime]
     data_source: Optional[str]
+    item_count: Optional[int]
 
     class Config:
         from_attributes = True

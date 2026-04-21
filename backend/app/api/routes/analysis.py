@@ -1,7 +1,9 @@
+import os
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from typing import Optional, List
+from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 from app.core.database import get_db
@@ -169,12 +171,9 @@ def get_wafer_bin_map(
         df = df[df['SITE_NUM'].isin(site_list)]
 
     # 找复测坐标
-    coord_counts = df.groupby(['X_COORD', 'Y_COORD']).size()
-    retest_coords = set(
-        f"{int(x)},{int(y)}"
-        for (x, y), cnt in coord_counts.items()
-        if cnt > 1
-    )
+    df['key'] = df['X_COORD'].astype(int).astype(str) + ',' + df['Y_COORD'].astype(int).astype(str)
+    counts = df['key'].value_counts()
+    retest_keys = set(counts[counts > 1].index)
 
     # 按data_range去重
     if data_range == 'final':
@@ -182,16 +181,18 @@ def get_wafer_bin_map(
     elif data_range == 'original':
         df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
 
+    # 构造结果
+    df['is_retest'] = df['key'].isin(retest_keys)
+    
     result = []
-    for _, row in df.iterrows():
-        x = int(row['X_COORD'])
-        y = int(row['Y_COORD'])
-        result.append({
-            "x": x,
-            "y": y,
-            "bin": int(row['SOFT_BIN']),
-            "retest": f"{x},{y}" in retest_coords
-        })
+    # 转换为 dict 列表，比 iterrows 快得多
+    temp_df = df[['X_COORD', 'Y_COORD', 'SOFT_BIN', 'is_retest']].copy()
+    temp_df.columns = ['x', 'y', 'bin', 'retest']
+    temp_df['x'] = temp_df['x'].astype(int)
+    temp_df['y'] = temp_df['y'].astype(int)
+    temp_df['bin'] = temp_df['bin'].astype(int)
+    
+    result = temp_df.to_dict('records')
 
     return {"data": result, "has_map": True}
 
@@ -237,6 +238,7 @@ def get_bin_summary(
             "bin_name": b.bin_name,
             "all_site_count": b.count,
             "all_site_pct": b.percentage,
+            "comment": b.comment,
             "sites": {}
         }
         for site in site_filter:
@@ -257,6 +259,28 @@ def get_bin_summary(
 
     return {"bins": result, "sites": site_filter, "all_sites": all_site_list}
 
+class BinCommentUpdate(BaseModel):
+    bin_number: int
+    comment: str
+
+@router.post("/lot/{lot_id}/bin_comment")
+def update_bin_comment(
+    lot_id: int,
+    data: BinCommentUpdate,
+    db: Session = Depends(get_db),
+):
+    """更新Bin的备注信息"""
+    bins = db.query(BinSummary).filter(
+        and_(
+            BinSummary.lot_id == lot_id,
+            BinSummary.bin_number == data.bin_number
+        )
+    ).all()
+    
+    for b in bins:
+        b.comment = data.comment
+    db.commit()
+    return {"status": "success"}
 
 @router.get("/lot/{lot_id}/retest_analysis")
 def get_retest_analysis(
@@ -403,11 +427,13 @@ def get_param_data(
     sigma: float = Query(3.0),
     sites: str = Query("all"),
     data_range: str = Query("final"),
+    custom_min: Optional[float] = Query(None),
+    custom_max: Optional[float] = Query(None),
     db: Session = Depends(get_db),
 ):
     """
     获取单个参数的原始数据（用于直方图/Scatter/WaferMap）
-    filter_type: all / robust / filter_by_limit / filter_by_sigma
+    filter_type: all / robust / filter_by_limit / filter_by_sigma / custom
     sites: all 或 逗号分隔的site编号 如 "1,2"
     data_range: final / original / all
     """
@@ -449,32 +475,45 @@ def get_param_data(
     unit = item.unit if item else ''
 
     # 应用Filter
-    from app.services.stats import apply_filter
+    from app.services.stats import apply_filter, calc_param_stats
 
     result_data = []
 
-    # 先计算 All Sites (site=0)
+    # ── 先计算 All Sites (site=0) ─────────────────────────
     all_values = df[param_name].dropna().values.astype(float)
-    filtered_all = apply_filter(all_values, filter_type, ll, ul, sigma)
-    from app.services.stats import calc_param_stats
+    filtered_all = apply_filter(all_values, filter_type, ll, ul, sigma, custom_min, custom_max)
     all_stats = calc_param_stats(filtered_all, ll, ul, len(filtered_all))
+
+    # 用 All Sites 过滤后数据计算全局统一 bin edges（50 bins）
+    # 所有 Site 的直方图共用这套 edges，确保 X 轴对齐
+    NUM_BINS = 50
+    if len(filtered_all) > 1:
+        global_min = float(np.min(filtered_all))
+        global_max = float(np.max(filtered_all))
+        if global_min == global_max:
+            global_min -= 0.5
+            global_max += 0.5
+        _, global_edges = np.histogram(filtered_all, bins=NUM_BINS,
+                                       range=(global_min, global_max))
+    else:
+        global_edges = np.linspace(0, 1, NUM_BINS + 1)
+
+    global_edges_list = [round(float(e), 6) for e in global_edges.tolist()]
 
     result_data.append({
         "site": 0,
-        "histogram": {"counts": [], "edges": []},
+        "histogram": {"counts": [], "edges": global_edges_list},
         "scatter": [],
         "wafer_map": [],
         "stats": all_stats,
     })
 
-    # 再按 Site 分组
+    # ── 再按 Site 分组 ────────────────────────────────────
     site_groups = df.groupby('SITE_NUM')
-
-
 
     for site_num, site_df in site_groups:
         values = site_df[param_name].dropna().values.astype(float)
-        filtered = apply_filter(values, filter_type, ll, ul, sigma)
+        filtered = apply_filter(values, filter_type, ll, ul, sigma, custom_min, custom_max)
 
         # Scatter数据：测试序号+值
         scatter = []
@@ -497,18 +536,16 @@ def get_param_data(
                         "val": float(row[param_name])
                     })
 
-        # 直方图数据：分箱
+        # 直方图：使用与 all_site 相同的全局 edges 分箱
         if len(filtered) > 0:
-            hist, bin_edges = np.histogram(filtered, bins=50)
+            hist, _ = np.histogram(filtered, bins=global_edges)
             histogram = {
                 "counts": hist.tolist(),
-                "edges": [round(float(e), 6) for e in bin_edges.tolist()]
+                "edges": global_edges_list,
             }
         else:
-            histogram = {"counts": [], "edges": []}
+            histogram = {"counts": [0] * NUM_BINS, "edges": global_edges_list}
 
-        # 统计数据
-        from app.services.stats import calc_param_stats
         stats = calc_param_stats(filtered, ll, ul, len(filtered))
 
         result_data.append({
@@ -526,5 +563,261 @@ def get_param_data(
         "upper_limit": ul,
         "filter_type": filter_type,
         "data_range": data_range,
+        "global_edges": global_edges_list,
         "sites": result_data,
     }
+
+
+# ── 多LOT分析 API ─────────────────────────────────────────
+
+@router.get("/multi/items")
+def get_multi_lot_items(
+    lot_ids: str = Query(..., description="逗号分隔的lot id，如 1,2,3"),
+    db: Session = Depends(get_db),
+):
+    """
+    多LOT参数汇总表：返回每个LOT的 site=0 参数统计
+    响应结构:
+    {
+      lots: [{id, filename, lot_id}],
+      params: [{item_number, item_name, unit, lower_limit, upper_limit,
+                lots: {lot_id: {mean,stdev,min_val,max_val,cpk,yield_rate,fail_count}}}]
+    }
+    """
+    ids = [int(x) for x in lot_ids.split(",") if x.strip()]
+    lots = db.query(Lot).filter(Lot.id.in_(ids)).all()
+    lot_map = {l.id: l for l in lots}
+    # 保持用户传入顺序
+    ordered_lots = [lot_map[i] for i in ids if i in lot_map]
+
+    # 以第一个LOT的参数顺序为基准
+    if not ordered_lots:
+        raise HTTPException(status_code=404, detail="LOT不存在")
+
+    ref_items = db.query(TestItem).filter(
+        TestItem.lot_id == ordered_lots[0].id,
+        TestItem.site == 0
+    ).order_by(TestItem.item_number).all()
+
+    params = []
+    for ref in ref_items:
+        row = {
+            "item_number": ref.item_number,
+            "item_name": ref.item_name,
+            "unit": ref.unit,
+            "lower_limit": ref.lower_limit,
+            "upper_limit": ref.upper_limit,
+            "lots": {}
+        }
+        for lot in ordered_lots:
+            item = db.query(TestItem).filter(
+                TestItem.lot_id == lot.id,
+                TestItem.item_name == ref.item_name,
+                TestItem.site == 0
+            ).first()
+            if item:
+                row["lots"][str(lot.id)] = {
+                    "mean": item.mean,
+                    "stdev": item.stdev,
+                    "min_val": item.min_val,
+                    "max_val": item.max_val,
+                    "cpk": item.cpk,
+                    "yield_rate": item.yield_rate,
+                    "fail_count": item.fail_count,
+                    "exec_qty": item.exec_qty,
+                }
+        params.append(row)
+
+    return {
+        "lots": [{"id": l.id, "filename": l.filename, "lot_id": l.lot_id} for l in ordered_lots],
+        "params": params,
+    }
+
+
+@router.get("/multi/param_hist")
+def get_multi_lot_param_hist(
+    lot_ids: str = Query(...),
+    param_name: str = Query(...),
+    filter_type: str = Query("all"),
+    sigma: float = Query(3.0),
+    data_range: str = Query("final"),
+    custom_min: Optional[float] = Query(None),
+    custom_max: Optional[float] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    多LOT单参数直方图数据，各LOT共用同一套 global_edges
+    """
+    from app.services.stats import apply_filter, calc_param_stats
+
+    ids = [int(x) for x in lot_ids.split(",") if x.strip()]
+    lots = db.query(Lot).filter(Lot.id.in_(ids)).all()
+    lot_map = {l.id: l for l in lots}
+    ordered_lots = [lot_map[i] for i in ids if i in lot_map]
+
+    # 获取 limit/unit（从第一个LOT）
+    ref_item = db.query(TestItem).filter(
+        TestItem.lot_id == ordered_lots[0].id,
+        TestItem.item_name == param_name,
+        TestItem.site == 0
+    ).first()
+    ll = ref_item.lower_limit if ref_item else None
+    ul = ref_item.upper_limit if ref_item else None
+    unit = ref_item.unit if ref_item else ""
+
+    # 先收集所有LOT的全部数据，计算全局 edges
+    all_values_combined = []
+    lot_values: dict = {}
+    for lot in ordered_lots:
+        if not lot.parquet_path or not os.path.exists(lot.parquet_path):
+            lot_values[lot.id] = np.array([])
+            continue
+        df = pd.read_parquet(lot.parquet_path)
+        if param_name not in df.columns:
+            lot_values[lot.id] = np.array([])
+            continue
+        if 'X_COORD' in df.columns and 'Y_COORD' in df.columns:
+            if data_range == 'final':
+                df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
+            elif data_range == 'original':
+                df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
+        vals = df[param_name].dropna().values.astype(float)
+        filtered = apply_filter(vals, filter_type, ll, ul, sigma, custom_min, custom_max)
+        lot_values[lot.id] = filtered
+        all_values_combined.extend(filtered.tolist())
+
+    all_arr = np.array(all_values_combined)
+    NUM_BINS = 50
+    if len(all_arr) > 1:
+        gmin, gmax = float(np.min(all_arr)), float(np.max(all_arr))
+        if gmin == gmax:
+            gmin -= 0.5; gmax += 0.5
+        _, global_edges = np.histogram(all_arr, bins=NUM_BINS, range=(gmin, gmax))
+    else:
+        global_edges = np.linspace(0, 1, NUM_BINS + 1)
+    global_edges_list = [round(float(e), 6) for e in global_edges.tolist()]
+
+    result = []
+    for lot in ordered_lots:
+        vals = lot_values.get(lot.id, np.array([]))
+        if len(vals) > 0:
+            counts, _ = np.histogram(vals, bins=global_edges)
+            counts_list = counts.tolist()
+        else:
+            counts_list = [0] * NUM_BINS
+        stats = calc_param_stats(vals, ll, ul, len(vals)) if len(vals) > 0 else {}
+        result.append({
+            "lot_id": lot.id,
+            "filename": lot.filename,
+            "counts": counts_list,
+            "stats": stats,
+        })
+
+    return {
+        "param_name": param_name,
+        "unit": unit,
+        "lower_limit": ll,
+        "upper_limit": ul,
+        "global_edges": global_edges_list,
+        "lots": result,
+    }
+
+
+@router.get("/multi/bin_summary")
+def get_multi_lot_bin_summary(
+    lot_ids: str = Query(...),
+    data_range: str = Query("final"),
+    db: Session = Depends(get_db),
+):
+    """
+    多LOT Bin汇总：行=Bin，列=各LOT
+    """
+    ids = [int(x) for x in lot_ids.split(",") if x.strip()]
+    lots = db.query(Lot).filter(Lot.id.in_(ids)).all()
+    lot_map = {l.id: l for l in lots}
+    ordered_lots = [lot_map[i] for i in ids if i in lot_map]
+
+    # 收集所有 bin_number
+    all_bin_numbers = set()
+    lot_bin_data: dict = {}
+    for lot in ordered_lots:
+        bins = db.query(BinSummary).filter(
+            BinSummary.lot_id == lot.id,
+            BinSummary.site == 0,
+            BinSummary.data_range == data_range
+        ).all()
+        lot_bin_data[lot.id] = {b.bin_number: b for b in bins}
+        all_bin_numbers.update(b.bin_number for b in bins)
+
+    sorted_bins = sorted(all_bin_numbers)
+
+    # 获取 bin_name（从任意一个LOT）
+    bin_names: dict = {}
+    for lot in ordered_lots:
+        for bn, b in lot_bin_data[lot.id].items():
+            if bn not in bin_names:
+                bin_names[bn] = b.bin_name
+
+    rows = []
+    for bn in sorted_bins:
+        row = {
+            "bin_number": bn,
+            "bin_name": bin_names.get(bn, f"Bin{bn}"),
+            "lots": {}
+        }
+        for lot in ordered_lots:
+            b = lot_bin_data[lot.id].get(bn)
+            row["lots"][str(lot.id)] = {
+                "count": b.count if b else 0,
+                "pct": b.percentage if b else 0.0,
+            }
+        rows.append(row)
+
+    return {
+        "lots": [{"id": l.id, "filename": l.filename, "lot_id": l.lot_id} for l in ordered_lots],
+        "bins": rows,
+    }
+
+
+@router.get("/multi/wafer_bin_maps")
+def get_multi_lot_wafer_bin_maps(
+    lot_ids: str = Query(...),
+    data_range: str = Query("final"),
+    db: Session = Depends(get_db),
+):
+    """
+    多LOT Wafer Bin Map，每个LOT返回独立的 map 数据
+    """
+    ids = [int(x) for x in lot_ids.split(",") if x.strip()]
+    lots = db.query(Lot).filter(Lot.id.in_(ids)).all()
+    lot_map = {l.id: l for l in lots}
+    ordered_lots = [lot_map[i] for i in ids if i in lot_map]
+
+    result = []
+    for lot in ordered_lots:
+        if not lot.parquet_path or not os.path.exists(lot.parquet_path):
+            result.append({"lot_id": lot.id, "filename": lot.filename, "has_map": False, "data": []})
+            continue
+        df = pd.read_parquet(lot.parquet_path)
+        if 'X_COORD' not in df.columns or 'Y_COORD' not in df.columns:
+            result.append({"lot_id": lot.id, "filename": lot.filename, "has_map": False, "data": []})
+            continue
+        df = df.dropna(subset=['X_COORD', 'Y_COORD', 'SOFT_BIN'])
+        if data_range == 'final':
+            df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
+        elif data_range == 'original':
+            df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
+        tmp = df[['X_COORD', 'Y_COORD', 'SOFT_BIN']].copy()
+        tmp.columns = ['x', 'y', 'bin']
+        tmp['x'] = tmp['x'].astype(int)
+        tmp['y'] = tmp['y'].astype(int)
+        tmp['bin'] = tmp['bin'].astype(int)
+        result.append({
+            "lot_id": lot.id,
+            "filename": lot.filename,
+            "lot_id_str": lot.lot_id,
+            "has_map": True,
+            "data": tmp.to_dict('records'),
+        })
+
+    return {"maps": result}

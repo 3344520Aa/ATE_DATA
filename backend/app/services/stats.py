@@ -39,11 +39,13 @@ def apply_filter(
     filter_type: str = 'all',
     ll: Optional[float] = None,
     ul: Optional[float] = None,
-    sigma: Optional[float] = None
+    sigma: Optional[float] = None,
+    custom_min: Optional[float] = None,
+    custom_max: Optional[float] = None,
 ) -> np.ndarray:
     """
     按Filter类型筛选数据
-    filter_type: all / robust / filter_by_limit / filter_by_sigma
+    filter_type: all / robust / filter_by_limit / filter_by_sigma / custom
     """
     data = data[~np.isnan(data)]
 
@@ -73,6 +75,13 @@ def apply_filter(
         if std == 0:
             return data
         return data[(data >= mean - n * std) & (data <= mean + n * std)]
+
+    elif filter_type == 'custom':
+        if custom_min is not None:
+            data = data[data >= custom_min]
+        if custom_max is not None:
+            data = data[data <= custom_max]
+        return data
 
     return data
 
@@ -241,6 +250,7 @@ def save_stats_to_db(
             ))
 
     db.bulk_save_objects(test_items_to_add)
+    lot.item_count = len(parsed.param_names)
     print(f"[stats] test_items 写入完成")
 
     # ── Bin 统计（Final 和 Original 各存一份）────────────

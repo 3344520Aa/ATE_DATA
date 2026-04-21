@@ -44,6 +44,21 @@ const router = createRouter({
         name: 'bin',
         component: () => import('@/views/BinView.vue'),
         },
+        {
+          path: 'multi-analysis',
+          name: 'multi-analysis',
+          component: () => import('@/views/MultiAnalysisView.vue'),
+        },
+        {
+          path: 'multi-param',
+          name: 'multi-param',
+          component: () => import('@/views/MultiParamView.vue'),
+        },
+        {
+          path: 'multi-bin',
+          name: 'multi-bin',
+          component: () => import('@/views/MultiBinView.vue'),
+        },
       ],
     },
   ],

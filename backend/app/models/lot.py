@@ -53,6 +53,9 @@ class Lot(Base):
     is_transferred = Column(Integer, default=0)
     local_expires_at = Column(DateTime)
 
+    # 测试项数量
+    item_count = Column(Integer, default=0)
+
     # 处理状态
     status = Column(Enum(ProcessStatus), default=ProcessStatus.pending)
     parquet_path = Column(String)

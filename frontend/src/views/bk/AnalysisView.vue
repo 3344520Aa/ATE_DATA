@@ -96,6 +96,16 @@
 
       <!-- 右侧内容区 -->
       <div class="content-area">
+        <!-- 顶部双图 -->
+        <div class="top-charts" v-if="topFail">
+          <div class="chart-box">
+            <div ref="topFailChartRef" style="width:100%;height:220px"></div>
+          </div>
+          <div class="chart-box">
+            <div ref="topFailSiteChartRef" style="width:100%;height:220px"></div>
+          </div>
+        </div>
+
         <!-- 参数表格 -->
         <div class="table-area">
           <ag-grid-vue
@@ -149,7 +159,7 @@ const defaultColDef = {
   minWidth: 80,
 }
 
-const columnDefs: any[] = [
+const columnDefs = [
   { headerName: '#', field: 'item_number', width: 70, pinned: 'left' },
   {
     headerName: 'TestItem',

@@ -14,6 +14,7 @@ class ParsedData:
     handler: str = ""
     beginning_time: Optional[str] = None
     ending_time: Optional[str] = None
+    test_date: Optional[str] = None   # 标准化测试日期 'YYYY-MM-DD HH:MM:SS' 或 'YYYY-MM-DD'
 
     # Bin定义 {bin_number: {"name": str, "hard_bin": int}}
     bin_definitions: dict = field(default_factory=dict)

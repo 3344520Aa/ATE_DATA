@@ -13,3 +13,4 @@ class BinSummary(Base):
     count = Column(Integer)
     percentage = Column(Float)
     data_range = Column(String, default="final")  # 新增
+    comment = Column(String, default="")          # 记录失效原因
