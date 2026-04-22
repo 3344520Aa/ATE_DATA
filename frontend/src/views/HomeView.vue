@@ -11,7 +11,7 @@
         <button class="btn btn-download" :disabled="!selectedRows.length" @click="handleDownload">
           ⬇ 下载原数据 {{ selectedRows.length ? `(${selectedRows.length})` : '' }}
         </button>
-        <button class="btn btn-merge" :disabled="selectedRows.length < 2" @click="showMergeDialog = true">
+        <button class="btn btn-merge" :disabled="selectedRows.length < 2" @click="openMergeDialog">
           🔗 合并数据 {{ selectedRows.length >= 2 ? `(${selectedRows.length})` : '' }}
         </button>
         <button class="btn btn-multi-analysis" :disabled="selectedRows.length < 2" @click="handleMultiAnalysis">
@@ -174,6 +174,17 @@ const showMergeDialog = ref(false)
 const mergeForm = ref({ new_name: '', new_lot_id: '', new_wafer_id: '' })
 const mergeError = ref('')
 const merging = ref(false)
+
+function openMergeDialog() {
+  const firstLot = selectedRows.value[0]
+  if (!firstLot) return
+  mergeForm.value = {
+    new_name: (firstLot.filename || '') + '_combine',
+    new_lot_id: firstLot.lot_id || '',
+    new_wafer_id: firstLot.wafer_id || '',
+  }
+  showMergeDialog.value = true
+}
 
 // 轮询相关
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null)

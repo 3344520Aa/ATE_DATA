@@ -3,7 +3,7 @@ import shutil
 import zipfile
 import io
 from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException, BackgroundTasks, Body
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Optional, List
@@ -33,8 +33,8 @@ async def upload_files(
     results = []
     for file in files:
         try:
-            result = await _process_upload(file, db, background_tasks)
-            results.append(result)
+            batch = await _process_upload(file, db, background_tasks)
+            results.extend(batch)
         except Exception as e:
             results.append({"filename": file.filename, "status": "failed", "error": str(e)})
     return {"results": results}
@@ -58,75 +58,100 @@ async def _process_upload(file: UploadFile, db: Session, background_tasks: Backg
         content = await file.read()
         f.write(content)
 
-    file_size = len(content)
-
     # 如果是zip，解压找csv
-    csv_path = save_path
-    if ext == '.zip':
+    is_zip = ext == '.zip'
+    csv_paths = [save_path]
+    extract_dir = None
+    if is_zip:
         extract_dir = os.path.join(UPLOAD_DIR, os.path.splitext(filename)[0])
         os.makedirs(extract_dir, exist_ok=True)
         with zipfile.ZipFile(save_path, 'r') as z:
             z.extractall(extract_dir)
-        # 找第一个csv文件
-        csv_files = [
-            os.path.join(extract_dir, f)
-            for f in os.listdir(extract_dir)
-            if f.endswith('.csv')
-        ]
+        # 找所有csv文件（包括子目录）
+        csv_files = []
+        for root, _, files in os.walk(extract_dir):
+            for f in files:
+                if f.lower().endswith('.csv'):
+                    csv_files.append(os.path.join(root, f))
         if not csv_files:
             raise HTTPException(status_code=400, detail="ZIP中未找到CSV文件")
-        csv_path = csv_files[0]
+        csv_paths = sorted(csv_files)
 
-    # 快速识别tester类型，提取基本元数据
-    from app.services.parsers.detector import detect_tester
-    tester = detect_tester(csv_path)
+    results = []
+    for csv_path in csv_paths:
+        csv_name = os.path.basename(csv_path)
 
-    # 创建LOT记录（先存pending状态）
-    lot = Lot(
-        filename=filename,
-        storage_path=save_path,
-        file_size=file_size,
-        status='pending',
-        data_source='manual',
-        storage_type='local',
-        local_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
-        upload_date=datetime.now(timezone.utc),
-        test_machine=tester,
-    )
+        if is_zip:
+            # 把该 CSV 单独压缩成一个 ZIP，storage_path 指向这个单独 ZIP
+            csv_base = os.path.splitext(csv_name)[0]
+            single_zip_path = os.path.join(extract_dir, f"{csv_base}.zip")
+            with zipfile.ZipFile(single_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.write(csv_path, csv_name)
+            lot_storage_path = single_zip_path
+            lot_file_size = os.path.getsize(single_zip_path)
+            lot_filename = csv_name
+            # CSV 原文件保留，供后台异步解析使用
+        else:
+            lot_storage_path = save_path
+            lot_file_size = len(content)
+            lot_filename = filename
 
-    # 快速解析表头获取基本信息
-    try:
-        meta = _quick_parse_meta(csv_path, tester)
-        lot.program = meta.get('program')
-        lot.lot_id = meta.get('lot_id')
-        lot.wafer_id = meta.get('wafer_id')
-        lot.handler = meta.get('handler')
-        lot.data_type = meta.get('test_stage')
-        # test_date 已由 parser 统一处理为标准字符串（YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD）
-        td_str = meta.get('test_date')
-        if td_str:
-            try:
-                if len(td_str) == 19:
-                    lot.test_date = datetime.strptime(td_str, '%Y-%m-%d %H:%M:%S')
-                elif len(td_str) == 10:
-                    lot.test_date = datetime.strptime(td_str, '%Y-%m-%d')
-            except Exception:
-                pass
-    except Exception:
-        pass
+        # 快速识别tester类型，提取基本元数据
+        from app.services.parsers.detector import detect_tester
+        tester = detect_tester(csv_path)
 
-    db.add(lot)
-    db.commit()
-    db.refresh(lot)
+        # 创建LOT记录（先存pending状态）
+        lot = Lot(
+            filename=lot_filename,
+            storage_path=lot_storage_path,
+            file_size=lot_file_size,
+            status='pending',
+            data_source='manual',
+            storage_type='local',
+            local_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            upload_date=datetime.now(timezone.utc),
+            test_machine=tester,
+        )
 
-    # 触发异步解析任务
-    background_tasks.add_task(_parse_and_save_bg, lot.id, csv_path)
+        # 快速解析表头获取基本信息
+        try:
+            meta = _quick_parse_meta(csv_path, tester)
+            lot.program = meta.get('program')
+            lot.lot_id = meta.get('lot_id')
+            lot.wafer_id = meta.get('wafer_id')
+            lot.handler = meta.get('handler')
+            lot.data_type = meta.get('test_stage')
+            # test_date 已由 parser 统一处理为标准字符串（YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD）
+            td_str = meta.get('test_date')
+            if td_str:
+                try:
+                    if len(td_str) == 19:
+                        lot.test_date = datetime.strptime(td_str, '%Y-%m-%d %H:%M:%S')
+                    elif len(td_str) == 10:
+                        lot.test_date = datetime.strptime(td_str, '%Y-%m-%d')
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-    return {
-        "filename": filename,
-        "status": lot.status,
-        "lot_id": lot.id
-    }
+        db.add(lot)
+        db.commit()
+        db.refresh(lot)
+
+        # 触发异步解析任务
+        background_tasks.add_task(_parse_and_save_bg, lot.id, csv_path)
+
+        results.append({
+            "filename": lot_filename,
+            "status": lot.status,
+            "lot_id": lot.id
+        })
+
+    # 所有 CSV 处理完后删除原始 ZIP
+    if is_zip and os.path.exists(save_path):
+        os.remove(save_path)
+
+    return results
 
 
 def _parse_and_save_bg(lot_id: int, csv_path: str):
@@ -440,8 +465,9 @@ class DownloadRequest(BaseModel):
 @router.post("/download")
 def download_lots(data: DownloadRequest, db: Session = Depends(get_db)):
     """
-    下载选中LOT的原始数据文件，打包为ZIP返回。
-    支持单条或多条同时下载。
+    下载选中LOT的原始数据文件。
+    - 单条且原始文件为ZIP时，直接返回原ZIP不再套包。
+    - 其他情况（单条CSV或多条）打包为ZIP返回。
     """
     ids = data.ids
     if not ids:
@@ -450,6 +476,19 @@ def download_lots(data: DownloadRequest, db: Session = Depends(get_db)):
     lots = db.query(Lot).filter(Lot.id.in_(ids)).all()
     if not lots:
         raise HTTPException(status_code=404, detail="选中的记录不存在")
+
+    # 单条且原始文件是ZIP，直接返回原文件
+    if len(lots) == 1:
+        lot = lots[0]
+        file_path = lot.storage_path
+        if file_path and os.path.exists(file_path):
+            ext = os.path.splitext(file_path)[-1].lower()
+            if ext == '.zip':
+                return FileResponse(
+                    file_path,
+                    media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{lot.filename}"'}
+                )
 
     # 准备ZIP文件（内存流）
     zip_buffer = io.BytesIO()

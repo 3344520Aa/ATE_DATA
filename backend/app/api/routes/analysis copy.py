@@ -186,12 +186,11 @@ def get_wafer_bin_map(
     
     result = []
     # 转换为 dict 列表，比 iterrows 快得多
-    temp_df = df[['X_COORD', 'Y_COORD', 'SOFT_BIN', 'SITE_NUM', 'is_retest']].copy()
-    temp_df.columns = ['x', 'y', 'bin', 'site', 'retest']
+    temp_df = df[['X_COORD', 'Y_COORD', 'SOFT_BIN', 'is_retest']].copy()
+    temp_df.columns = ['x', 'y', 'bin', 'retest']
     temp_df['x'] = temp_df['x'].astype(int)
     temp_df['y'] = temp_df['y'].astype(int)
     temp_df['bin'] = temp_df['bin'].astype(int)
-    temp_df['site'] = temp_df['site'].astype(int)
     
     result = temp_df.to_dict('records')
 
@@ -485,61 +484,22 @@ def get_param_data(
     filtered_all = apply_filter(all_values, filter_type, ll, ul, sigma, custom_min, custom_max)
     all_stats = calc_param_stats(filtered_all, ll, ul, len(filtered_all))
 
-    # 用 All Sites 过滤后数据计算全局统一 bin edges
+    # 用 All Sites 过滤后数据计算全局统一 bin edges（50 bins）
     # 所有 Site 的直方图共用这套 edges，确保 X 轴对齐
     NUM_BINS = 50
-    exceeds_limit = False   # 数据是否超限
-    ll_bin_index = None     # LL 在第几个 bin 边界
-    ul_bin_index = None     # UL 在第几个 bin 边界
-
     if len(filtered_all) > 1:
         global_min = float(np.min(filtered_all))
         global_max = float(np.max(filtered_all))
-
         if global_min == global_max:
             center = global_min
             half = abs(center) * 0.5 if center != 0 else 0.5
             global_min = center - half
             global_max = center + half
-            _, global_edges = np.histogram(filtered_all, bins=NUM_BINS,
-                                           range=(global_min, global_max))
-        elif ll is not None and ul is not None and ll != ul and (global_min < ll or global_max > ul):
-            # ── 数据超限：非均匀分bin ──
-            # LL放在20%位置(bin #10), UL放在80%位置(bin #40)
-            # 10 bins: [left_bound, LL]
-            # 30 bins: [LL, UL]
-            # 10 bins: [UL, right_bound]
-            exceeds_limit = True
-            n_below = 10
-            n_mid = 30
-            n_above = 10
-            ll_bin_index = n_below       # LL 在 edge[10]
-            ul_bin_index = n_below + n_mid  # UL 在 edge[40]
-
-            # 左边界：取 min(数据最小值, LL)，加少量margin
-            left_bound = min(global_min, ll)
-            left_margin = (ul - ll) * 0.03
-            left_bound = left_bound - left_margin
-
-            # 右边界：取 max(数据最大值, UL)，加少量margin
-            right_bound = max(global_max, ul)
-            right_margin = (ul - ll) * 0.03
-            right_bound = right_bound + right_margin
-
-            edges_below = np.linspace(left_bound, ll, n_below + 1)
-            edges_mid = np.linspace(ll, ul, n_mid + 1)
-            edges_above = np.linspace(ul, right_bound, n_above + 1)
-
-            # 合并，去掉重复的边界点
-            global_edges = np.concatenate([edges_below, edges_mid[1:], edges_above[1:]])
-        else:
-            # 数据在限内或无双边Limit：均匀分bin
-            _, global_edges = np.histogram(filtered_all, bins=NUM_BINS,
-                                           range=(global_min, global_max))
+        _, global_edges = np.histogram(filtered_all, bins=NUM_BINS,
+                                       range=(global_min, global_max))
     else:
         global_edges = np.linspace(0, 1, NUM_BINS + 1)
 
-    NUM_BINS = len(global_edges) - 1  # 实际 bin 数量（非均匀时仍为50）
     global_edges_list = [round(float(e), 6) for e in global_edges.tolist()]
 
     result_data.append({
@@ -578,7 +538,7 @@ def get_param_data(
                         "val": float(row[param_name])
                     })
 
-        # 直方图：使用全局 edges 分箱
+        # 直方图：使用与 all_site 相同的全局 edges 分箱
         if len(filtered) > 0:
             hist, _ = np.histogram(filtered, bins=global_edges)
             histogram = {
@@ -606,9 +566,6 @@ def get_param_data(
         "filter_type": filter_type,
         "data_range": data_range,
         "global_edges": global_edges_list,
-        "exceeds_limit": exceeds_limit,
-        "ll_bin_index": ll_bin_index,
-        "ul_bin_index": ul_bin_index,
         "sites": result_data,
     }
 

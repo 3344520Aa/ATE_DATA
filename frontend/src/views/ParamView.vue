@@ -131,7 +131,7 @@
 
           <!-- 直方图 -->
           <div v-if="currentTab.options.show_histogram && currentTab.data" class="chart-container">
-            <div :ref="el => setChartRef(currentTab?.id, 'hist', el)" style="width:800px;height:320px"></div>
+            <div :ref="el => setChartRef(currentTab?.id, 'hist', el)" style="width:600px;height:400px"></div>
           </div>
 
           <!-- Scatter图 -->
@@ -498,44 +498,105 @@ function getGlobalRange(tab: any): { min: number; max: number } {
 }
 
 // ── 直方图 X 轴范围计算 ────────────────────────────────
-// 规则：
-//   有LL/UL且数据未超限 → LL在1/10处，UL在9/10处，等间距11刻度
-//   有LL/UL但数据超限   → 用数据min/max（含少量padding），LL/UL画在对应位置
-//   无LL/UL             → 用数据min/max
+// 规则（按优先级）：
+//   D: 固定值（LL==UL 且 数据无变化）→ 以中心值±50%展示
+//   A: 双边Limit且数据在限内     → LL在10%处，UL在90%处
+//   B: 双边Limit但数据超限       → LL在20%处，UL在80%处，两侧动态扩展到数据极值
+//   E: 单边Limit               → 数据范围+padding，确保该Limit可见
+//   C: 无Limit / LL==UL但数据有变化 → 数据min/max+padding
 function calcHistXRange(
   dataMin: number, dataMax: number,
-  ll: number | null, ul: number | null
+  ll: number | null, ul: number | null,
+  edgesMin?: number, edgesMax?: number
 ): { xMin: number; xMax: number; ticks: number[] } {
-  const hasLimit = ll !== null && ul !== null
+  const hasLL = ll !== null && ll !== undefined
+  const hasUL = ul !== null && ul !== undefined
+  const hasBothLimits = hasLL && hasUL
 
-  if (hasLimit) {
-    const dataExceedsLimit = dataMin < ll! || dataMax > ul!
+  // Case D: 固定值 — 仅当 LL==UL 且 数据也无变化时
+  if (dataMin === dataMax && (!hasBothLimits || ll === ul)) {
+    const center = dataMin
+    const half = Math.abs(center) * 0.5 || 0.5
+    const xMin = center - half
+    const xMax = center + half
+    const ticks = buildTicks(xMin, xMax, 11)
+    return { xMin, xMax, ticks }
+  }
+
+  // 当 LL==UL 时，Limit无意义，按数据范围走 Case C
+  if (hasBothLimits && ll === ul) {
+    const rangeMin = edgesMin ?? dataMin
+    const rangeMax = edgesMax ?? dataMax
+    const padding = (rangeMax - rangeMin) * 0.05 || Math.abs(rangeMax) * 0.01 || 0.1
+    const xMin = rangeMin - padding
+    const xMax = rangeMax + padding
+    const ticks = buildTicks(xMin, xMax, 11)
+    return { xMin, xMax, ticks }
+  }
+
+  if (hasBothLimits) {
+    // 使用 edges 范围（后端已做 clamp）来判断是否超限
+    const effMin = edgesMin ?? dataMin
+    const effMax = edgesMax ?? dataMax
+    const dataExceedsLimit = effMin < ll! || effMax > ul!
 
     if (!dataExceedsLimit) {
       // Case A: 数据全在限内，LL在1/10处，UL在9/10处
-      // xRange * 0.1 = LL - xMin  →  xMin = LL - xRange*0.1
-      // xRange = (UL - LL) / 0.8
       const range = (ul! - ll!) / 0.8
       const xMin = ll! - range * 0.1
       const xMax = ul! + range * 0.1
       const ticks = buildTicks(xMin, xMax, 11)
       return { xMin, xMax, ticks }
     } else {
-      // Case B: 数据超限，用数据范围加5%padding
-      const padding = (dataMax - dataMin) * 0.05 || Math.abs(dataMax) * 0.01 || 0.1
-      const xMin = dataMin - padding
-      const xMax = dataMax + padding
+      // Case B: 数据超限
+      // X轴中心 = LL/UL中点, LL放在20%位置, UL放在80%位置
+      // LL~UL占据中间60%的区间，两侧各20%动态扩展到数据极值
+      const limitRange = ul! - ll!
+      // LL~UL对应x轴的 [0.2, 0.8]，即60%宽度 = limitRange
+      // 总宽度 = limitRange / 0.6
+      const totalRange = limitRange / 0.6
+      const center = (ll! + ul!) / 2
+      let xMin = center - totalRange / 2  // LL在20%处
+      let xMax = center + totalRange / 2  // UL在80%处
+
+      // 如果数据超出了默认20%区间，动态扩展到数据极值
+      if (effMin < xMin) {
+        // 数据最小值比默认下界还小，扩展左侧
+        // 保持UL在80%处不变，LL从20%位置向左压缩
+        // 新的xMin = effMin，但需要保证LL和UL的相对位置合理
+        xMin = effMin - (effMin === ll! ? limitRange * 0.05 : (ll! - effMin) * 0.1)
+      }
+      if (effMax > xMax) {
+        // 数据最大值比默认上界还大，扩展右侧
+        xMax = effMax + (effMax === ul! ? limitRange * 0.05 : (effMax - ul!) * 0.1)
+      }
+
       const ticks = buildTicks(xMin, xMax, 11)
       return { xMin, xMax, ticks }
     }
-  } else {
-    // Case C: 无限，数据范围
-    const padding = (dataMax - dataMin) * 0.05 || Math.abs(dataMax) * 0.01 || 0.1
-    const xMin = dataMin - padding
-    const xMax = dataMax + padding
+  }
+
+  if (hasLL || hasUL) {
+    // Case E: 单边Limit，确保Limit在可见范围内
+    const effMin = edgesMin ?? dataMin
+    const effMax = edgesMax ?? dataMax
+    const rangeMin = hasLL ? Math.min(effMin, ll!) : effMin
+    const rangeMax = hasUL ? Math.max(effMax, ul!) : effMax
+    const padding = (rangeMax - rangeMin) * 0.05 || Math.abs(rangeMax) * 0.01 || 0.1
+    const xMin = rangeMin - padding
+    const xMax = rangeMax + padding
     const ticks = buildTicks(xMin, xMax, 11)
     return { xMin, xMax, ticks }
   }
+
+  // Case C: 无Limit，纯数据范围
+  const effMin = edgesMin ?? dataMin
+  const effMax = edgesMax ?? dataMax
+  const padding = (effMax - effMin) * 0.05 || Math.abs(effMax) * 0.01 || 0.1
+  const xMin = effMin - padding
+  const xMax = effMax + padding
+  const ticks = buildTicks(xMin, xMax, 11)
+  return { xMin, xMax, ticks }
 }
 
 function buildTicks(xMin: number, xMax: number, count: number): number[] {
@@ -550,111 +611,290 @@ function renderHistogram(tabId: string) {
   const chart = chartInstances[`${tabId}_hist`]
   if (!chart) return
 
-  const { sites, param_name, unit, lower_limit: ll, upper_limit: ul, global_edges } = tab.data
+  const { sites, param_name, unit, lower_limit: ll, upper_limit: ul,
+          global_edges, exceeds_limit, ll_bin_index, ul_bin_index } = tab.data
   const allSites = sites.filter((s: any) => s.site > 0)
   const edges: number[] = global_edges ?? allSites[0]?.histogram.edges ?? []
   if (edges.length < 2) return
 
   const allSiteStats = sites.find((s: any) => s.site === 0)?.stats
-  const dataMin = allSiteStats?.min_val ?? edges[0]
-  const dataMax = allSiteStats?.max_val ?? edges[edges.length - 1]
+  const numBins = edges.length - 1
 
-  const { xMin, xMax, ticks } = calcHistXRange(dataMin, dataMax, ll, ul)
-
-  // bin centers & bar width
-  const binCenters = edges.slice(0, -1).map((e: number, i: number) => (e + edges[i + 1]) / 2)
-  // barWidth in pixels ≈ chartWidth(700px) / numBins * dataBinWidth/xRange
-  const xRange = xMax - xMin
-  const binW = edges[1] - edges[0]
-  const barWidthPct = Math.max(1, (binW / xRange) * 700)
-
-  const series: any[] = allSites.map((s: any, idx: number) => ({
-    type: 'bar',
-    name: `Site${s.site}`,
-    data: s.histogram.counts.map((cnt: number, i: number) => [binCenters[i], cnt]),
-    itemStyle: { color: SITE_COLORS[idx % SITE_COLORS.length], opacity: 0.7 },
-    barGap: '-100%',
-    barWidth: barWidthPct,
-  }))
-
-  // markLine数据：LL/UL红线
-  const markLineData: any[] = []
-  if (ll !== null && ll !== undefined) {
-    markLineData.push({
-      xAxis: ll,
-      label: { formatter: `LL:${ll}`, position: 'insideStartTop', fontSize: 10, color: 'red' },
-      lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
-    })
-  }
-  if (ul !== null && ul !== undefined) {
-    markLineData.push({
-      xAxis: ul,
-      label: { formatter: `UL:${ul}`, position: 'insideStartTop', fontSize: 10, color: 'red' },
-      lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
-    })
-  }
-
-  // filter_by_sigma时，加sigma限制绿线
-  if (tab.options.filter_type === 'filter_by_sigma' && allSiteStats?.mean != null && allSiteStats?.stdev != null) {
-    const n = tab.options.sigma ?? 3
-    const sigmaL = allSiteStats.mean - n * allSiteStats.stdev
-    const sigmaU = allSiteStats.mean + n * allSiteStats.stdev
-    markLineData.push({
-      xAxis: sigmaL,
-      label: { formatter: `${n}σL`, position: 'insideStartTop', fontSize: 10, color: '#00c853' },
-      lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
-    })
-    markLineData.push({
-      xAxis: sigmaU,
-      label: { formatter: `${n}σU`, position: 'insideStartTop', fontSize: 10, color: '#00c853' },
-      lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
-    })
-  }
-
-  // 挂在第一个bar series上，保证渲染
-  if (series.length > 0) {
-    series[0].markLine = {
-      silent: true,
-      symbol: 'none',
-      animation: false,
-      data: markLineData,
+  // ── 判断渲染模式 ──
+  if (exceeds_limit && ll_bin_index != null && ul_bin_index != null) {
+    // ═══ 超限模式：使用 category 轴，每个 bin 等宽 ═══
+    // 生成 category 标签（bin 中心值）
+    const binLabels: string[] = []
+    for (let i = 0; i < numBins; i++) {
+      binLabels.push(((edges[i] + edges[i + 1]) / 2).toFixed(3))
     }
-  }
 
-  chart.setOption({
-    title: {
-      text: `${param_name}`,
-      subtext: allSiteStats
-        ? `Min=${allSiteStats.min_val?.toFixed(4)} Max=${allSiteStats.max_val?.toFixed(4)} Mean=${allSiteStats.mean?.toFixed(4)} Stdev=${allSiteStats.stdev?.toFixed(4)} CPK=${allSiteStats.cpk?.toFixed(4)}`
-        : '',
-      left: 'center',
-      textStyle: { fontSize: 13 },
-      subtextStyle: { fontSize: 11, color: '#666' },
-    },
-    tooltip: { trigger: 'axis' },
-    legend: { bottom: 0, data: allSites.map((s: any) => `Site${s.site}`) },
-    xAxis: {
-      type: 'value',
-      name: unit,
-      min: xMin,
-      max: xMax,
-      interval: (xMax - xMin) / 10,
-      axisLabel: {
-        rotate: 30,
-        fontSize: 10,
-        formatter: (v: number) => {
-          // 显示11个固定刻度
-          const isOnTick = ticks.some(t => Math.abs(t - v) < (xMax - xMin) / 100)
-          return isOnTick ? v.toFixed(3) : ''
+    const series: any[] = []
+    allSites.forEach((s: any, idx: number) => {
+      const siteStats = s.stats || allSiteStats
+      const sigma6L = siteStats?.mean != null && siteStats?.stdev != null ? siteStats.mean - 6 * siteStats.stdev : -Infinity
+      const sigma6U = siteStats?.mean != null && siteStats?.stdev != null ? siteStats.mean + 6 * siteStats.stdev : Infinity
+
+      const normalData = s.histogram.counts.map((cnt: number, i: number) => {
+        const center = (edges[i] + edges[i + 1]) / 2
+        if ((center < sigma6L || center > sigma6U) && cnt > 0 && cnt < 5) return '-'
+        return cnt
+      })
+      const outlierData = s.histogram.counts.map((cnt: number, i: number) => {
+        const center = (edges[i] + edges[i + 1]) / 2
+        if ((center < sigma6L || center > sigma6U) && cnt > 0 && cnt < 5) return cnt
+        return '-'
+      })
+
+      series.push({
+        type: 'bar',
+        name: `Site${s.site}`,
+        data: normalData,
+        itemStyle: { color: SITE_COLORS[idx % SITE_COLORS.length], opacity: 0.7 },
+        barGap: '-100%',
+        barWidth: '90%',
+      })
+
+      if (outlierData.some((d: any) => d !== '-')) {
+        series.push({
+          type: 'bar',
+          name: `Site${s.site}`,
+          data: outlierData,
+          itemStyle: { color: SITE_COLORS[idx % SITE_COLORS.length], opacity: 0.7 },
+          barGap: '-100%',
+          barWidth: '90%',
+          barMinHeight: 5,
+        })
+      }
+    })
+
+    // markLine：LL/UL 用 category index 定位
+    const markLineData: any[] = []
+    if (ll !== null && ll !== undefined) {
+      markLineData.push({
+        xAxis: ll_bin_index,
+        label: { formatter: `LL:${ll}`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: 'red', rotate: 0 },
+        lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
+      })
+    }
+    if (ul !== null && ul !== undefined) {
+      markLineData.push({
+        xAxis: ul_bin_index,
+        label: { formatter: `UL:${ul}`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: 'red', rotate: 0 },
+        lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
+      })
+    }
+
+    // sigma 线：找到最近的 category index
+    if (tab.options.filter_type === 'filter_by_sigma' && allSiteStats?.mean != null && allSiteStats?.stdev != null) {
+      const n = tab.options.sigma ?? 3
+      const sigmaL = allSiteStats.mean - n * allSiteStats.stdev
+      const sigmaU = allSiteStats.mean + n * allSiteStats.stdev
+      const findBinIndex = (val: number) => {
+        for (let i = 0; i < numBins; i++) {
+          if (val >= edges[i] && val < edges[i + 1]) return i
+        }
+        return val < edges[0] ? 0 : numBins - 1
+      }
+      markLineData.push({
+        xAxis: findBinIndex(sigmaL),
+        label: { formatter: `${n}σL`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: '#00c853', rotate: 0 },
+        lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
+      })
+      markLineData.push({
+        xAxis: findBinIndex(sigmaU),
+        label: { formatter: `${n}σU`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: '#00c853', rotate: 0 },
+        lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
+      })
+    }
+
+    if (series.length > 0) {
+      series[0].markLine = { silent: true, symbol: 'none', animation: false, data: markLineData }
+    }
+
+    // X轴标签：只在关键位置显示（LL, UL, 起点, 终点, 中间几个）
+    const labelPositions = new Set<number>([0, numBins - 1, ll_bin_index, ul_bin_index])
+    // 在 LL~UL 区间内均匀加几个标签
+    const midStep = Math.max(1, Math.floor((ul_bin_index - ll_bin_index) / 4))
+    for (let i = ll_bin_index; i <= ul_bin_index; i += midStep) labelPositions.add(i)
+    // 在 below/above 区间也各加一两个
+    if (ll_bin_index > 2) labelPositions.add(Math.floor(ll_bin_index / 2))
+    if (numBins - ul_bin_index > 2) labelPositions.add(ul_bin_index + Math.floor((numBins - ul_bin_index) / 2))
+
+    chart.setOption({
+      title: {
+        text: `${param_name}`,
+        subtext: allSiteStats
+          ? `Min=${allSiteStats.min_val?.toFixed(4)} Max=${allSiteStats.max_val?.toFixed(4)} Mean=${allSiteStats.mean?.toFixed(4)} Stdev=${allSiteStats.stdev?.toFixed(4)} CPK=${allSiteStats.cpk?.toFixed(4)}`
+          : '',
+        left: 'center',
+        textStyle: { fontSize: 13 },
+        subtextStyle: { fontSize: 11, color: '#666' },
+      },
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params: any) => {
+          if (!params || params.length === 0) return ''
+          const idx = params[0].dataIndex
+          const lo = edges[idx]?.toFixed(4) ?? ''
+          const hi = edges[idx + 1]?.toFixed(4) ?? ''
+          let tip = `<div style="font-size:11px">[${lo}, ${hi})</div>`
+          params.forEach((p: any) => {
+            if (p.value > 0) tip += `<div>${p.marker} ${p.seriesName}: ${p.value}</div>`
+          })
+          return tip
         },
       },
-    },
-    yAxis: [
-      { type: 'value', name: 'Parts' },
-      { type: 'value', name: 'Percent(%)', max: 100 },
-    ],
-    series,
-  }, true)
+      legend: { bottom: 0, data: allSites.map((s: any) => `Site${s.site}`) },
+      xAxis: {
+        type: 'category',
+        data: binLabels,
+        name: unit,
+        axisLabel: {
+          rotate: 30,
+          fontSize: 10,
+          interval: 0,
+          formatter: (_: string, index: number) => {
+            if (labelPositions.has(index)) {
+              // 在 LL 和 UL 位置显示 limit 值
+              if (index === ll_bin_index && ll != null) return `LL:${ll}`
+              if (index === ul_bin_index && ul != null) return `UL:${ul}`
+              return edges[index]?.toFixed(3) ?? ''
+            }
+            return ''
+          },
+        },
+        axisTick: { alignWithLabel: true },
+      },
+      yAxis: [
+        { type: 'value', name: 'Parts' },
+        { type: 'value', name: 'Percent(%)', max: 100 },
+      ],
+      series,
+    }, true)
+  } else {
+    // ═══ 正常模式：使用 value 轴 ═══
+    const dataMin = allSiteStats?.min_val ?? edges[0]
+    const dataMax = allSiteStats?.max_val ?? edges[edges.length - 1]
+    const edgesMin = edges[0]
+    const edgesMax = edges[edges.length - 1]
+    const { xMin, xMax, ticks } = calcHistXRange(dataMin, dataMax, ll, ul, edgesMin, edgesMax)
+
+    const binCenters = edges.slice(0, -1).map((e: number, i: number) => (e + edges[i + 1]) / 2)
+    const xRange = xMax - xMin
+    const binW = edges[1] - edges[0]
+    const barWidthPct = Math.max(8, (binW / xRange) * 700)
+
+    const series: any[] = []
+    allSites.forEach((s: any, idx: number) => {
+      const siteStats = s.stats || allSiteStats
+      const sigma6L = siteStats?.mean != null && siteStats?.stdev != null ? siteStats.mean - 6 * siteStats.stdev : -Infinity
+      const sigma6U = siteStats?.mean != null && siteStats?.stdev != null ? siteStats.mean + 6 * siteStats.stdev : Infinity
+
+      const normalData: any[] = []
+      const outlierData: any[] = []
+      
+      s.histogram.counts.forEach((cnt: number, i: number) => {
+        const center = (edges[i] + edges[i + 1]) / 2
+        if ((center < sigma6L || center > sigma6U) && cnt > 0 && cnt < 5) {
+          outlierData.push([binCenters[i], cnt])
+        } else {
+          normalData.push([binCenters[i], cnt])
+        }
+      })
+
+      series.push({
+        type: 'bar',
+        name: `Site${s.site}`,
+        data: normalData,
+        itemStyle: { color: SITE_COLORS[idx % SITE_COLORS.length], opacity: 0.7 },
+        barGap: '-100%',
+        barWidth: barWidthPct,
+      })
+
+      if (outlierData.length > 0) {
+        series.push({
+          type: 'bar',
+          name: `Site${s.site}`,
+          data: outlierData,
+          itemStyle: { color: SITE_COLORS[idx % SITE_COLORS.length], opacity: 0.7 },
+          barGap: '-100%',
+          barWidth: barWidthPct,
+          barMinHeight: 5,
+        })
+      }
+    })
+
+    const markLineData: any[] = []
+    if (ll !== null && ll !== undefined) {
+      markLineData.push({
+        xAxis: ll,
+        label: { formatter: `LL:${ll}`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: 'red', rotate: 0 },
+        lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
+      })
+    }
+    if (ul !== null && ul !== undefined) {
+      markLineData.push({
+        xAxis: ul,
+        label: { formatter: `UL:${ul}`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: 'red', rotate: 0 },
+        lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
+      })
+    }
+
+    if (tab.options.filter_type === 'filter_by_sigma' && allSiteStats?.mean != null && allSiteStats?.stdev != null) {
+      const n = tab.options.sigma ?? 3
+      const sigmaL = allSiteStats.mean - n * allSiteStats.stdev
+      const sigmaU = allSiteStats.mean + n * allSiteStats.stdev
+      markLineData.push({
+        xAxis: sigmaL,
+        label: { formatter: `${n}σL`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: '#00c853', rotate: 0 },
+        lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
+      })
+      markLineData.push({
+        xAxis: sigmaU,
+        label: { formatter: `${n}σU`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: '#00c853', rotate: 0 },
+        lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
+      })
+    }
+
+    if (series.length > 0) {
+      series[0].markLine = { silent: true, symbol: 'none', animation: false, data: markLineData }
+    }
+
+    chart.setOption({
+      title: {
+        text: `${param_name}`,
+        subtext: allSiteStats
+          ? `Min=${allSiteStats.min_val?.toFixed(4)} Max=${allSiteStats.max_val?.toFixed(4)} Mean=${allSiteStats.mean?.toFixed(4)} Stdev=${allSiteStats.stdev?.toFixed(4)} CPK=${allSiteStats.cpk?.toFixed(4)}`
+          : '',
+        left: 'center',
+        textStyle: { fontSize: 13 },
+        subtextStyle: { fontSize: 11, color: '#666' },
+      },
+      tooltip: { trigger: 'axis' },
+      legend: { bottom: 0, data: allSites.map((s: any) => `Site${s.site}`) },
+      xAxis: {
+        type: 'value',
+        name: unit,
+        min: xMin,
+        max: xMax,
+        interval: (xMax - xMin) / 10,
+        axisLabel: {
+          rotate: 30,
+          fontSize: 10,
+          formatter: (v: number) => {
+            const isOnTick = ticks.some(t => Math.abs(t - v) < (xMax - xMin) / 100)
+            return isOnTick ? v.toFixed(3) : ''
+          },
+        },
+      },
+      yAxis: [
+        { type: 'value', name: 'Parts' },
+        { type: 'value', name: 'Percent(%)', max: 100 },
+      ],
+      series,
+    }, true)
+  }
 }
 
 // ── Scatter渲染 ────────────────────────────────────────

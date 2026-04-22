@@ -93,6 +93,14 @@
             ></canvas>
             <div class="bin-legend">
               <div
+                class="bin-icon"
+                :class="{ selected: selectedBins[idx] === null }"
+                @click="toggleHighlight(idx, null)"
+              >
+                <span class="bin-dot" style="background:#aaa"></span>
+                <span>ALL</span>
+              </div>
+              <div
                 v-for="b in getMapBins(mapItem)"
                 :key="b.bin_number"
                 class="bin-icon"

@@ -186,12 +186,11 @@ def get_wafer_bin_map(
     
     result = []
     # 转换为 dict 列表，比 iterrows 快得多
-    temp_df = df[['X_COORD', 'Y_COORD', 'SOFT_BIN', 'SITE_NUM', 'is_retest']].copy()
-    temp_df.columns = ['x', 'y', 'bin', 'site', 'retest']
+    temp_df = df[['X_COORD', 'Y_COORD', 'SOFT_BIN', 'is_retest']].copy()
+    temp_df.columns = ['x', 'y', 'bin', 'retest']
     temp_df['x'] = temp_df['x'].astype(int)
     temp_df['y'] = temp_df['y'].astype(int)
     temp_df['bin'] = temp_df['bin'].astype(int)
-    temp_df['site'] = temp_df['site'].astype(int)
     
     result = temp_df.to_dict('records')
 

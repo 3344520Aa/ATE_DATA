@@ -49,29 +49,36 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:3344520Qq@db:5432/chip_data}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       SECRET_KEY: ${SECRET_KEY:-chip-ate-analysis-system-secret-key-2026}
-      APP_ENV: ${APP_ENV:-production}
-      DEBUG: "false"
+      APP_ENV: development
+      DEBUG: "true"
       UPLOAD_DIR: ${UPLOAD_DIR:-/app/uploads}
       MAX_USER_STORAGE_GB: ${MAX_USER_STORAGE_GB:-10}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
+      - ./backend:/app
       - uploads_data:/app/uploads
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: node:20-alpine
     container_name: chip_frontend
-    restart: always
+    working_dir: /app
     depends_on:
       - backend
     ports:
       - "5173:5173"
     environment:
       - BACKEND_URL=http://backend:8000
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: >
+      sh -c "npm config set registry https://registry.npmmirror.com &&
+             npm install &&
+             npm run dev"
 
 volumes:
   uploads_data:
+  frontend_node_modules:
 
 networks:
   default:

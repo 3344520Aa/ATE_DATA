@@ -127,9 +127,10 @@
       <!-- 左：Bin Map -->
       <div class="map-section">
         <div class="section-title">Bin Map</div>
-        <div class="map-with-legend">
+        <div class="map-with-legend" style="position:relative">
           <canvas ref="binMapCanvas" width="800" height="800"
             style="width:800px;height:800px;border:1px solid #eee;flex-shrink:0"></canvas>
+          <div ref="binMapTooltipEl" class="bin-tooltip" style="display:none"></div>
           <div class="bin-legend">
             <div :class="['bin-icon', { selected: selectedBin === null }]"
               @click="selectedBin = null; renderBinMap()">
@@ -261,10 +262,14 @@ const route = useRoute()
 const lotId = ref(Number(route.params.id))
 
 const binMapCanvas = ref<HTMLCanvasElement>()
+const binMapTooltipEl = ref<HTMLDivElement | null>(null)
 const yieldPlotCanvas = ref<HTMLCanvasElement>()
 const failBinChartRef = ref<HTMLElement>()
 const binDetailCanvas = ref<HTMLCanvasElement>()
 let failBinChart: echarts.ECharts | null = null
+
+// Bin Map hover state
+let binMapDies: { px: number; py: number; size: number; x: number; y: number; bin: number; site: number }[] = []
 
 const lotInfo = ref<any>(null)
 const binData = ref<any>({ bins: [], sites: [], all_sites: [] })
@@ -503,7 +508,7 @@ watch(retestExpanded, async (val) => {
 function renderBinMap() {
   const canvas = binMapCanvas.value
   if (!canvas) return
-  
+
   if (!mapCache.value.length) {
     const ctx = canvas.getContext('2d')
     if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height)
@@ -511,10 +516,17 @@ function renderBinMap() {
   }
 
   // Site过滤
-  const data = mapCache.value
+  let data = mapCache.value
   if (options.value.selected_sites.length < allSites.value.length) {
-    // 需要按site过滤，但mapCache没有site信息，需要从parquet读
-    // 暂时显示全部
+    // 需要按site过滤，但mapCache已有site信息
+    data = data.filter((d: any) => options.value.selected_sites.includes(d.site))
+  }
+
+  // 绑定鼠标事件（只绑定一次）
+  if (!(canvas as any)._binMapBound) {
+    canvas.onmousemove = onBinMapMouseMove
+    canvas.onmouseleave = onBinMapMouseLeave
+    ;(canvas as any)._binMapBound = true
   }
 
   drawBinMap(canvas, data, selectedBin.value)
@@ -571,6 +583,8 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
     !coordSet.has(`${rx-1},${ry}`) || !coordSet.has(`${rx+1},${ry}`) ||
     !coordSet.has(`${rx},${ry-1}`) || !coordSet.has(`${rx},${ry+1}`)
 
+  // 记录die位置供hover检测
+  binMapDies = []
   rotated.forEach(d => {
     const px = margin + (d.rx - rMinX) * cellW + (cellW - cellSize) / 2
     const py = margin + (d.ry - rMinY) * cellH + (cellH - cellSize) / 2
@@ -598,6 +612,9 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
       ctx.fillRect(cx - thick / 2, cy - arm, thick, arm * 2)
       ctx.fillRect(cx - arm, cy - thick / 2, arm * 2, thick)
     }
+
+    // 记录位置用于hover检测（使用原始坐标x,y）
+    binMapDies.push({ px, py, size: cellSize, x: d.x, y: d.y, bin: d.bin, site: d.site })
   })
 
   // 坐标标注
@@ -613,6 +630,41 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
   for (let ry = rMinY; ry <= rMaxY; ry += yStep) {
     ctx.fillText(String(ry), margin - 4, margin + (ry - rMinY) * cellH + cellH / 2 + 4)
   }
+}
+
+// ── Bin Map Tooltip ────────────────────────────────────
+function onBinMapMouseMove(evt: MouseEvent) {
+  const canvas = binMapCanvas.value
+  const tooltipEl = binMapTooltipEl.value
+  if (!canvas || !tooltipEl || !binMapDies.length) return
+
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = canvas.width / rect.width
+  const scaleY = canvas.height / rect.height
+  const mx = (evt.clientX - rect.left) * scaleX
+  const my = (evt.clientY - rect.top) * scaleY
+
+  let found = null
+  for (const die of binMapDies) {
+    if (mx >= die.px && mx <= die.px + die.size && my >= die.py && my <= die.py + die.size) {
+      found = die
+      break
+    }
+  }
+
+  if (found) {
+    tooltipEl.innerHTML = `<div>X: ${found.x}, Y: ${found.y}</div><div>Bin: ${found.bin}</div><div>Site: ${found.site}</div>`
+    tooltipEl.style.display = 'block'
+    tooltipEl.style.left = (evt.offsetX + 14) + 'px'
+    tooltipEl.style.top = (evt.offsetY + 14) + 'px'
+  } else {
+    tooltipEl.style.display = 'none'
+  }
+}
+
+function onBinMapMouseLeave() {
+  const tooltipEl = binMapTooltipEl.value
+  if (tooltipEl) tooltipEl.style.display = 'none'
 }
 
 // ── Yield Plot（12区域晶圆良率图）───────────────────────
@@ -1196,4 +1248,16 @@ border: 1px solid #f0f0f0;
 }
 .modal-close { cursor: pointer; color: #999; font-size: 18px; }
 .modal-close:hover { color: red; }
+
+.bin-tooltip {
+  position: absolute;
+  background: rgba(0,0,0,0.78);
+  color: white;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 100;
+}
 </style>

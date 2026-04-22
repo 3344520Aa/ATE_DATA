@@ -652,14 +652,11 @@ def parse_acco(filepath: str, tester: str) -> ParsedData:
             seen[name] = 0
             unique_names.append(name)
 
-    valid_count = _get_valid_param_count(raw_lines, data_start_row, data_start_col)
-    param_end   = data_start_col + valid_count if valid_count else len(unique_names)
-    print(f"[parser] 有效参数: {valid_count}, "
-          f"表头总参数: {len(unique_names) - data_start_col}")
+    param_end = len(unique_names)
+    print(f"[parser] 参数列起止: {data_start_col} ~ {param_end}, "
+          f"表头总参数: {param_end - data_start_col}")
 
     for i in range(data_start_col, param_end):
-        if i >= len(unique_names):
-            break
         pname = unique_names[i]
         if not pname:
             continue

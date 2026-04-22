@@ -143,7 +143,7 @@ function renderHist() {
   const binCenters = edges.slice(0, -1).map((e: number, i: number) => (e + edges[i + 1]) / 2)
   const xRange = edges[edges.length - 1] - edges[0]
   const binW = edges[1] - edges[0]
-  const barWidthPct = Math.max(1, (binW / xRange) * 700)
+  const barWidthPct = Math.max(8, (binW / xRange) * 700)
 
   let series: any[] = []
 

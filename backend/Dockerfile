@@ -3,11 +3,18 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 换 Debian 源加速 apt-get
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
+
+# 换 PyPI 源加速 pip install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Install Python dependencies
 COPY requirements.txt .

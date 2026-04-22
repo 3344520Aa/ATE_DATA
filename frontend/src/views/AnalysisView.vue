@@ -268,7 +268,8 @@ function renderTopFailCharts() {
 
 function onRowClicked(params: any) {
   const paramName = params.data.item_name
-  router.push(`/lot/${lotId.value}/param/${encodeURIComponent(paramName)}`)
+  const url = router.resolve(`/lot/${lotId.value}/param/${encodeURIComponent(paramName)}`).href
+  window.open(url, '_blank')
 }
 
 function handleSubmit() {
