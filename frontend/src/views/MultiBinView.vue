@@ -208,9 +208,11 @@ function drawMap(idx: number) {
 
   const W = canvas.width, H = canvas.height, margin = 24
   const gridW = maxX - minX + 1, gridH = maxY - minY + 1
-  const cellW = (W - margin * 2) / gridW
-  const cellH = (H - margin * 2) / gridH
-  const cellSize = Math.max(0.5, Math.min(cellW, cellH) - 0.5)
+  const cellSize = Math.max(1, Math.min((W - margin * 2) / gridW, (H - margin * 2) / gridH) - 1)
+  const mapWidth = gridW * (cellSize + 1)
+  const mapHeight = gridH * (cellSize + 1)
+  const offsetX = (W - mapWidth) / 2
+  const offsetY = (H - mapHeight) / 2
 
   ctx.clearRect(0, 0, W, H)
 
@@ -221,8 +223,8 @@ function drawMap(idx: number) {
     !coordSet.has(`${x},${y-1}`) || !coordSet.has(`${x},${y+1}`)
 
   for (const d of data) {
-    const px = margin + (d.x - minX) * cellW + (cellW - cellSize) / 2
-    const py = margin + (d.y - minY) * cellH + (cellH - cellSize) / 2
+    const px = offsetX + (d.x - minX) * (cellSize + 1)
+    const py = offsetY + (d.y - minY) * (cellSize + 1)
 
     let color: string
     if (highlight !== null) {
@@ -240,14 +242,14 @@ function drawMap(idx: number) {
   ctx.fillStyle = '#aaa'
   ctx.font = `${Math.max(8, Math.min(11, cellSize))}px sans-serif`
   ctx.textAlign = 'center'
-  const xStep = Math.ceil(gridW / 8)
+  const xStep = Math.ceil(gridW / 10) || 1
   for (let x = minX; x <= maxX; x += xStep) {
-    ctx.fillText(String(x), margin + (x - minX) * cellW + cellW / 2, margin - 4)
+    ctx.fillText(String(x), offsetX + (x - minX) * (cellSize + 1) + cellSize / 2, offsetY - 6)
   }
   ctx.textAlign = 'right'
-  const yStep = Math.ceil(gridH / 8)
+  const yStep = Math.ceil(gridH / 10) || 1
   for (let y = minY; y <= maxY; y += yStep) {
-    ctx.fillText(String(y), margin - 4, margin + (y - minY) * cellH + cellH / 2 + 4)
+    ctx.fillText(String(y), offsetX - 6, offsetY + (y - minY) * (cellSize + 1) + cellSize / 2 + 4)
   }
 }
 

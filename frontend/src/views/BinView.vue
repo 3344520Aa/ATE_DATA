@@ -569,12 +569,16 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
     if (d.ry > rMaxY) rMaxY = d.ry
   }
 
-  const W = canvas.width, H = canvas.height, margin = 30
+  const W = canvas.width, H = canvas.height, margin = 40
   const gridW = rMaxX - rMinX + 1
   const gridH = rMaxY - rMinY + 1
-  const cellW = (W - margin * 2) / gridW
-  const cellH = (H - margin * 2) / gridH
-  const cellSize = Math.max(0.5, Math.min(cellW, cellH) - 0.5)
+  
+  // 核心修复：使用统一的 cellSize 保持长宽比，并居中显示
+  const cellSize = Math.max(1, Math.min((W - margin * 2) / gridW, (H - margin * 2) / gridH) - 1)
+  const mapWidth = gridW * (cellSize + 1)
+  const mapHeight = gridH * (cellSize + 1)
+  const offsetX = (W - mapWidth) / 2
+  const offsetY = (H - mapHeight) / 2
 
   ctx.clearRect(0, 0, W, H)
 
@@ -586,8 +590,8 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
   // 记录die位置供hover检测
   binMapDies = []
   rotated.forEach(d => {
-    const px = margin + (d.rx - rMinX) * cellW + (cellW - cellSize) / 2
-    const py = margin + (d.ry - rMinY) * cellH + (cellH - cellSize) / 2
+    const px = offsetX + (d.rx - rMinX) * (cellSize + 1)
+    const py = offsetY + (d.ry - rMinY) * (cellSize + 1)
 
     let color = ''
     if (highlightBin !== null) {
@@ -621,14 +625,14 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
   ctx.fillStyle = '#aaa'
   ctx.font = `${Math.max(8, Math.min(11, cellSize))}px sans-serif`
   ctx.textAlign = 'center'
-  const xStep = Math.ceil((rMaxX - rMinX + 1) / 8)
+  const xStep = Math.ceil(gridW / 10) || 1
   for (let rx = rMinX; rx <= rMaxX; rx += xStep) {
-    ctx.fillText(String(rx), margin + (rx - rMinX) * cellW + cellW / 2, margin - 4)
+    ctx.fillText(String(rx), offsetX + (rx - rMinX) * (cellSize + 1) + cellSize / 2, offsetY - 6)
   }
   ctx.textAlign = 'right'
-  const yStep = Math.ceil((rMaxY - rMinY + 1) / 8)
+  const yStep = Math.ceil(gridH / 10) || 1
   for (let ry = rMinY; ry <= rMaxY; ry += yStep) {
-    ctx.fillText(String(ry), margin - 4, margin + (ry - rMinY) * cellH + cellH / 2 + 4)
+    ctx.fillText(String(ry), offsetX - 6, offsetY + (ry - rMinY) * (cellSize + 1) + cellSize / 2 + 4)
   }
 }
 

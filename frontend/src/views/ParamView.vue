@@ -213,13 +213,16 @@ const hiddenSites = ref<Set<number>>(new Set())
 
 // Wafer map state per tab (for hit-testing on hover)
 const waferMapState: Record<string, {
-  dies: { px: number; py: number; size: number; dieX: number; dieY: number; val: number; site: number }[]
+  dies: { px: number; py: number; size: number; dieX: number; dieY: number; val: number; site: number, lvl: number }[]
   canvasEl: HTMLCanvasElement | null
+  legendBlocks?: { lvl: number, x: number, y: number, w: number, h: number }[]
+  activeLevel?: number | null
 }> = {}
 
 interface Tab {
   id: string
   title: string
+  item_number: number | string
   param_name: string
   options: any
   data: any
@@ -248,6 +251,7 @@ watch(currentTab, (newTab) => {
     sigmaInputValue.value = newTab.options.sigma
     customMinInput.value = newTab.options.custom_min
     customMaxInput.value = newTab.options.custom_max
+    currentParamName.value = newTab.param_name
   }
 }, { immediate: true })
 
@@ -318,10 +322,16 @@ function setChartRef(tabId: string | undefined, type: string, el: any) {
       if (waferMapState[tabId]?.canvasEl) {
         waferMapState[tabId].canvasEl!.onmousemove = null
         waferMapState[tabId].canvasEl!.onmouseleave = null
+        waferMapState[tabId].canvasEl!.onclick = null
       }
       chartInstances[key] = el
-      waferMapState[tabId] = { dies: [], canvasEl: el }
+      if (!waferMapState[tabId]) {
+        waferMapState[tabId] = { dies: [], canvasEl: el, legendBlocks: [], activeLevel: null }
+      } else {
+        waferMapState[tabId].canvasEl = el
+      }
       el.onmousemove = (evt: MouseEvent) => onWaferMouseMove(tabId, evt)
+      el.onclick = (evt: MouseEvent) => onWaferClick(tabId, evt)
       el.onmouseleave = () => {
         // 直接操作DOM，不触发Vue响应式
         if (waferTooltipEl.value) waferTooltipEl.value.style.display = 'none'
@@ -342,11 +352,35 @@ function setChartRef(tabId: string | undefined, type: string, el: any) {
       if (waferMapState[tabId]?.canvasEl) {
         waferMapState[tabId].canvasEl!.onmousemove = null
         waferMapState[tabId].canvasEl!.onmouseleave = null
+        waferMapState[tabId].canvasEl!.onclick = null
       }
       delete waferMapState[tabId]
     } else if (chartInstances[key]?.dispose) {
       chartInstances[key].dispose()
       delete chartInstances[key]
+    }
+  }
+}
+
+function onWaferClick(tabId: string, evt: MouseEvent) {
+  const state = waferMapState[tabId]
+  if (!state?.canvasEl || !state.legendBlocks) return
+  const rect = state.canvasEl.getBoundingClientRect()
+  const scaleX = state.canvasEl.width / rect.width
+  const scaleY = state.canvasEl.height / rect.height
+  const mx = (evt.clientX - rect.left) * scaleX
+  const my = (evt.clientY - rect.top) * scaleY
+
+  for (const b of state.legendBlocks) {
+    if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
+      if (state.activeLevel === b.lvl) {
+        state.activeLevel = null // click again to restore
+      } else {
+        state.activeLevel = b.lvl
+      }
+      renderWaferMap(tabId, state.canvasEl)
+      renderScatter(tabId)
+      return
     }
   }
 }
@@ -414,11 +448,23 @@ function addTab() {
   const paramItem = paramList.value.find(p => p.item_name === paramName)
   const title = `${paramItem?.item_number ?? ''}:${paramName} #${tabCounter.value}`
 
+  let optionsToUse
+  if (currentTab.value) {
+    optionsToUse = JSON.parse(JSON.stringify(currentTab.value.options))
+    if (currentTab.value.param_name !== paramName) {
+      optionsToUse.custom_min = null
+      optionsToUse.custom_max = null
+    }
+  } else {
+    optionsToUse = { ...draftOptions.value }
+  }
+
   const newTab: Tab = {
     id: tabId,
     title,
+    item_number: paramItem?.item_number ?? '',
     param_name: paramName,
-    options: { ...draftOptions.value },
+    options: optionsToUse,
     data: null,
   }
 
@@ -463,6 +509,7 @@ function closeTab(tabId: string) {
     if (waferMapState[tabId].canvasEl) {
       waferMapState[tabId].canvasEl!.onmousemove = null
       waferMapState[tabId].canvasEl!.onmouseleave = null
+      waferMapState[tabId].canvasEl!.onclick = null
     }
     delete waferMapState[tabId]
   }
@@ -723,7 +770,7 @@ function renderHistogram(tabId: string) {
 
     chart.setOption({
       title: {
-        text: `${param_name}`,
+        text: `${tab.item_number}.${param_name}`,
         subtext: allSiteStats
           ? `Min=${allSiteStats.min_val?.toFixed(4)} Max=${allSiteStats.max_val?.toFixed(4)} Mean=${allSiteStats.mean?.toFixed(4)} Stdev=${allSiteStats.stdev?.toFixed(4)} CPK=${allSiteStats.cpk?.toFixed(4)}`
           : '',
@@ -750,6 +797,9 @@ function renderHistogram(tabId: string) {
         type: 'category',
         data: binLabels,
         name: unit,
+        axisLine: { onZero: false, show: false },
+        axisTick: { alignWithLabel: true, show: true },
+        splitLine: { show: true, lineStyle: { type: 'dashed' } },
         axisLabel: {
           rotate: 30,
           fontSize: 10,
@@ -766,10 +816,21 @@ function renderHistogram(tabId: string) {
         },
         axisTick: { alignWithLabel: true },
       },
-      yAxis: [
-        { type: 'value', name: 'Parts' },
-        { type: 'value', name: 'Percent(%)', max: 100 },
-      ],
+      yAxis: {
+        type: 'value',
+        name: 'Parts',
+        nameLocation: 'middle',
+        nameRotate: 90,
+        nameGap: 40,
+        axisLine: {
+          show: true,
+          onZero: false,
+          lineStyle: { color: '#333' }
+        },
+        splitLine: {
+          lineStyle: { type: 'dashed' }
+        }
+      },
       series,
     }, true)
   } else {
@@ -863,7 +924,7 @@ function renderHistogram(tabId: string) {
 
     chart.setOption({
       title: {
-        text: `${param_name}`,
+        text: `${tab.item_number}.${param_name}`,
         subtext: allSiteStats
           ? `Min=${allSiteStats.min_val?.toFixed(4)} Max=${allSiteStats.max_val?.toFixed(4)} Mean=${allSiteStats.mean?.toFixed(4)} Stdev=${allSiteStats.stdev?.toFixed(4)} CPK=${allSiteStats.cpk?.toFixed(4)}`
           : '',
@@ -879,6 +940,9 @@ function renderHistogram(tabId: string) {
         min: xMin,
         max: xMax,
         interval: (xMax - xMin) / 10,
+        axisLine: { onZero: false, show: false },
+        axisTick: { show: true },
+        splitLine: { show: true, lineStyle: { type: 'dashed' } },
         axisLabel: {
           rotate: 30,
           fontSize: 10,
@@ -888,10 +952,21 @@ function renderHistogram(tabId: string) {
           },
         },
       },
-      yAxis: [
-        { type: 'value', name: 'Parts' },
-        { type: 'value', name: 'Percent(%)', max: 100 },
-      ],
+      yAxis: {
+        type: 'value',
+        name: 'Parts',
+        nameLocation: 'middle',
+        nameRotate: 90,
+        nameGap: 40,
+        axisLine: {
+          show: true,
+          onZero: false,
+          lineStyle: { color: '#333' }
+        },
+        splitLine: {
+          lineStyle: { type: 'dashed' }
+        }
+      },
       series,
     }, true)
   }
@@ -904,16 +979,51 @@ function renderScatter(tabId: string) {
   const chart = chartInstances[`${tabId}_scatter`]
   if (!chart) return
 
+  const allSiteStats = tab.data.sites.find((s: any) => s.site === 0)?.stats
+  let validMin = allSiteStats?.min_val
+  let validMax = allSiteStats?.max_val
+  
+  const hasValidData = validMin != null && validMax != null
+
+  let mapMinVal = validMin ?? 0
+  let mapMaxVal = validMax ?? 1
+  
+  if (hasValidData) {
+    if (tab.options.filter_type === 'custom') {
+      if (tab.options.custom_min != null) mapMinVal = Math.min(mapMinVal, tab.options.custom_min)
+      if (tab.options.custom_max != null) mapMaxVal = Math.max(mapMaxVal, tab.options.custom_max)
+    }
+    if (mapMinVal === mapMaxVal) {
+      mapMinVal -= 1
+      mapMaxVal += 1
+    }
+  }
+
+  const activeLevel = waferMapState[tabId]?.activeLevel
+
   const { sites, unit, lower_limit: ll, upper_limit: ul } = tab.data
   const allSites = sites.filter((s: any) => s.site > 0)
 
-  const series: any[] = allSites.map((s: any, idx: number) => ({
-    type: 'scatter',
-    name: `Site${s.site}`,
-    data: s.scatter.map((p: any) => [p.idx, p.val]),
-    symbolSize: 3,
-    itemStyle: { color: SITE_COLORS[idx % SITE_COLORS.length], opacity: 0.6 },
-  }))
+  const series: any[] = allSites.map((s: any, idx: number) => {
+    let validData = []
+    if (hasValidData) {
+      validData = s.scatter.filter((p: any) => p.val >= validMin! && p.val <= validMax!)
+      if (activeLevel != null) {
+        validData = validData.filter((p: any) => {
+          const lvl = valToLevel(p.val, mapMinVal, mapMaxVal, NUM_COLOR_LEVELS)
+          return lvl === activeLevel
+        })
+      }
+    }
+
+    return {
+      type: 'scatter',
+      name: `Site${s.site}`,
+      data: validData.map((p: any) => [p.idx, p.val]),
+      symbolSize: 3,
+      itemStyle: { color: SITE_COLORS[idx % SITE_COLORS.length], opacity: 0.6 },
+    }
+  })
 
   series.push({
     type: 'line',
@@ -970,7 +1080,7 @@ function levelToColor(level: number, total: number): string {
 function valToLevel(val: number, minVal: number, maxVal: number, levels: number): number {
   if (maxVal === minVal) return Math.floor(levels / 2)
   const ratio = (val - minVal) / (maxVal - minVal)
-  return Math.min(levels - 1, Math.floor(ratio * levels))
+  return Math.min(levels - 1, Math.max(0, Math.floor(ratio * levels)))
 }
 
 function renderWaferMap(tabId: string, canvas: HTMLCanvasElement) {
@@ -999,7 +1109,26 @@ function renderWaferMap(tabId: string, canvas: HTMLCanvasElement) {
     return
   }
 
-  const { min: minVal, max: maxVal } = getGlobalRange(tab)
+  const allSiteStats = tab.data.sites.find((s: any) => s.site === 0)?.stats
+  if (!allSiteStats || allSiteStats.min_val == null) {
+    if (waferMapState[tabId]) waferMapState[tabId].dies = []
+    return
+  }
+
+  let minVal = allSiteStats.min_val
+  let maxVal = allSiteStats.max_val
+  
+  if (tab.options.filter_type === 'custom') {
+    if (tab.options.custom_min != null) minVal = Math.min(minVal, tab.options.custom_min)
+    if (tab.options.custom_max != null) maxVal = Math.max(maxVal, tab.options.custom_max)
+  }
+
+  if (minVal === maxVal) {
+    minVal -= 1
+    maxVal += 1
+  }
+
+  const validData = allData.filter(d => d.val >= allSiteStats.min_val && d.val <= allSiteStats.max_val)
 
   // 用全部site（含隐藏的）计算坐标范围，保持map位置稳定
   const allCoords: any[] = []
@@ -1019,27 +1148,45 @@ function renderWaferMap(tabId: string, canvas: HTMLCanvasElement) {
   const W = canvas.width
   const H = canvas.height
   const margin = 30
-  const mapAreaW = W - LEGEND_TOTAL_W - margin  // 地图可用宽度
+  const mapAreaW = W - LEGEND_TOTAL_W - margin * 2
+  const gridW = maxX - minX + 1
+  const gridH = maxY - minY + 1
+  const cellSize = Math.max(1, Math.min(mapAreaW / gridW, (H - margin * 2) / gridH) - 1)
+  const mapWidth = gridW * (cellSize + 1)
+  const mapHeight = gridH * (cellSize + 1)
+  const offsetX = (mapAreaW - mapWidth) / 2 + margin
+  const offsetY = (H - mapHeight) / 2
 
-  const cellW = (mapAreaW - margin * 2) / (maxX - minX + 1)
-  const cellH = (H - margin * 2) / (maxY - minY + 1)
-  const cellSize = Math.min(cellW, cellH) - 1
+  // 绘制底图所有测试过的die (浅灰色背景)
+  ctx.fillStyle = '#f5f5f5'
+  allCoords.forEach((d: any) => {
+    const px = offsetX + (d.x - minX) * (cellSize + 1)
+    const py = offsetY + (d.y - minY) * (cellSize + 1)
+    ctx.fillRect(px, py, cellSize, cellSize)
+  })
 
   // 统计每个色阶die数量
   const levelCounts = new Array(NUM_COLOR_LEVELS).fill(0)
-  allData.forEach(d => {
+  validData.forEach(d => {
     levelCounts[valToLevel(d.val, minVal, maxVal, NUM_COLOR_LEVELS)]++
   })
 
   // 绘制die，记录位置供hover检测
   const dies: typeof waferMapState[string]['dies'] = []
-  allData.forEach(d => {
-    const px = margin + (d.x - minX) * cellW + cellW / 2 - cellSize / 2
-    const py = margin + (d.y - minY) * cellH + cellH / 2 - cellSize / 2
+  const activeLevel = waferMapState[tabId]?.activeLevel
+
+  validData.forEach(d => {
     const lvl = valToLevel(d.val, minVal, maxVal, NUM_COLOR_LEVELS)
+    
+    // 如果有选中的色阶且当前die不在此色阶，跳过绘制（显示为底层浅灰）
+    if (activeLevel != null && lvl !== activeLevel) return
+
+    const px = offsetX + (d.x - minX) * (cellSize + 1)
+    const py = offsetY + (d.y - minY) * (cellSize + 1)
+    
     ctx.fillStyle = levelToColor(lvl, NUM_COLOR_LEVELS)
     ctx.fillRect(px, py, cellSize, cellSize)
-    dies.push({ px, py, size: cellSize, dieX: d.x, dieY: d.y, val: d.val, site: d.site })
+    dies.push({ px, py, size: cellSize, dieX: d.x, dieY: d.y, val: d.val, site: d.site, lvl })
   })
   if (waferMapState[tabId]) waferMapState[tabId].dies = dies
 
@@ -1051,6 +1198,8 @@ function renderWaferMap(tabId: string, canvas: HTMLCanvasElement) {
 
   const blockX = legendStartX + LEGEND_RANGE_W + 4
   const countX = blockX + LEGEND_BLOCK_W + 4
+
+  const legendBlocks: typeof waferMapState[string]['legendBlocks'] = []
 
   ctx.font = '9px Arial'
 
@@ -1075,12 +1224,23 @@ function renderWaferMap(tabId: string, canvas: HTMLCanvasElement) {
     // 中间：色块
     ctx.fillStyle = levelToColor(lvl, NUM_COLOR_LEVELS)
     ctx.fillRect(blockX, blockY, LEGEND_BLOCK_W, blockH - 1)
+    legendBlocks.push({ lvl, x: blockX, y: blockY, w: LEGEND_BLOCK_W, h: blockH - 1 })
+
+    if (activeLevel === lvl) {
+      ctx.strokeStyle = '#000'
+      ctx.lineWidth = 1.5
+      ctx.strokeRect(blockX - 1, blockY - 1, LEGEND_BLOCK_W + 2, blockH)
+    }
 
     // 右侧：count
     ctx.fillStyle = '#444'
     ctx.textAlign = 'left'
     ctx.textBaseline = 'middle'
     ctx.fillText(`${levelCounts[lvl]}`, countX, midY)
+  }
+  
+  if (waferMapState[tabId]) {
+    waferMapState[tabId].legendBlocks = legendBlocks
   }
 
   // 图例标题

@@ -63,7 +63,6 @@
             <option value="robust">Robust Data</option>
             <option value="filter_by_limit">Filter By Limit</option>
             <option value="filter_by_sigma">Filter by Sigma</option>
-            <option value="custom">Custom</option>
           </select>
         </div>
 
@@ -74,24 +73,31 @@
 
         <div class="option-group">
           <label>DataRange</label>
-          <div class="radio-group">
+          <div class="radio-group row">
             <label><input type="radio" v-model="options.data_range" value="final" /> Final</label>
             <label><input type="radio" v-model="options.data_range" value="original" /> Original</label>
-            <label><input type="radio" v-model="options.data_range" value="all" /> All</label>
           </div>
         </div>
 
         <div class="option-group">
-          <label>Top Fail</label>
-          <input v-model.number="options.top_n" type="number" min="3" max="20" />
+          <label>chars_row</label>
+          <div class="radio-group row">
+            <label><input type="radio" v-model="options.chars_row" :value="1" /> 1</label>
+            <label><input type="radio" v-model="options.chars_row" :value="3" /> 3</label>
+            <label><input type="radio" v-model="options.chars_row" :value="5" /> 5</label>
+          </div>
         </div>
 
-        <div class="option-group">
-          <label>CPK &lt;</label>
-          <input v-model.number="options.cpk_filter" type="number" step="0.1" placeholder="1.33" />
-        </div>
-
-        <button class="submit-btn" @click="handleSubmit">提交</button>
+        <button class="export-btn" :disabled="exporting" @click="handleExport">
+          <template v-if="!exporting">导出 Excel</template>
+          <div v-else class="progress-circle">
+            <svg viewBox="0 0 36 36">
+              <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <path class="circle" :style="{ strokeDasharray: `${exportProgress}, 100` }" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <text x="18" y="20.35" class="percentage">{{ exportProgress }}%</text>
+            </svg>
+          </div>
+        </button>
       </div>
 
       <!-- 右侧内容区 -->
@@ -103,8 +109,11 @@
             :rowData="testItems"
             :columnDefs="columnDefs"
             :defaultColDef="defaultColDef"
+            rowSelection="multiple"
+            :suppressRowClickSelection="true"
             style="width:100%;height:100%"
-            @row-clicked="onRowClicked"
+            @grid-ready="onGridReady"
+            @cell-clicked="onCellClicked"
           />
         </div>
       </div>
@@ -125,22 +134,22 @@ const lotId = ref<number>(Number(route.params.id))
 
 const lotInfo = ref<any>(null)
 const testItems = ref<any[]>([])
-const topFail = ref<any>(null)
 const itemCount = ref(0)
+const gridApi = ref<any>(null)
 
-
-const topFailChartRef = ref<HTMLElement>()
-const topFailSiteChartRef = ref<HTMLElement>()
-let topFailChart: echarts.ECharts | null = null
-let topFailSiteChart: echarts.ECharts | null = null
+function onGridReady(params: any) {
+  gridApi.value = params.api
+}
 
 const options = ref({
   filter_type: 'all',
   data_range: 'final',
   sigma: 3,
-  top_n: 5,
-  cpk_filter: null as number | null,
+  chars_row: 3,
 })
+
+const exporting = ref(false)
+const exportProgress = ref(0)
 
 const defaultColDef = {
   resizable: true,
@@ -150,13 +159,32 @@ const defaultColDef = {
 }
 
 const columnDefs: any[] = [
-  { headerName: '#', field: 'item_number', width: 70, pinned: 'left' },
+  { 
+    headerName: '#', 
+    field: 'item_number', 
+    width: 90, 
+    pinned: 'left',
+    checkboxSelection: true,
+    headerCheckboxSelection: true,
+    filter: true,
+    floatingFilter: true,
+    suppressMenu: false,
+    suppressHeaderMenuButton: false,
+    suppressHeaderFilterButton: false,
+    floatingFilterComponentParams: { suppressFilterButton: true }
+  },
   {
     headerName: 'TestItem',
     field: 'item_name',
     width: 200,
     pinned: 'left',
     cellStyle: { color: '#1890ff', cursor: 'pointer' },
+    filter: true,
+    floatingFilter: true,
+    suppressMenu: false,
+    suppressHeaderMenuButton: false,
+    suppressHeaderFilterButton: false,
+    floatingFilterComponentParams: { suppressFilterButton: true }
   },
   { headerName: 'L.Limit', field: 'lower_limit', width: 100 },
   { headerName: 'U.Limit', field: 'upper_limit', width: 100 },
@@ -200,82 +228,94 @@ async function fetchLotInfo() {
 }
 
 async function fetchItems() {
-  const data: any[] = await api.get(`/analysis/lot/${lotId.value}/items`, {
-    params: { site: 0 }
+  const data: any[] = await api.get(`/analysis/lot/${lotId.value}/items_summary`, {
+    params: { 
+      filter_type: options.value.filter_type,
+      sigma: options.value.sigma,
+      data_range: options.value.data_range
+    }
   })
-  let filtered = data
-  if (options.value.cpk_filter !== null) {
-    filtered = data.filter(item =>
-      item.cpk === null || item.cpk < options.value.cpk_filter!
-    )
-  }
-  testItems.value = filtered
+  testItems.value = data
   itemCount.value = data.length
 }
 
-async function fetchTopFail() {
-  topFail.value = await api.get(`/analysis/lot/${lotId.value}/top_fail`, {
-    params: { top_n: options.value.top_n }
-  })
-  await nextTick()
-  renderTopFailCharts()
-}
-
-function renderTopFailCharts() {
-  if (!topFail.value || !topFailChartRef.value) return
-
-  const items = topFail.value.items
-  const names = items.map((i: any) => i.item_name)
-  const counts = items.map((i: any) => i.fail_count)
-
-  // 左图：All Sites柱状图
-  if (!topFailChart) {
-    topFailChart = echarts.init(topFailChartRef.value)
+async function handleExport() {
+  if (exporting.value) return
+  
+  let selectedItems = ''
+  if (gridApi.value) {
+    const selectedNodes = gridApi.value.getSelectedNodes()
+    if (selectedNodes.length > 0) {
+      selectedItems = selectedNodes.map((node: any) => node.data.item_number).join(',')
+    }
   }
-  topFailChart.setOption({
-    title: { text: 'TOP Fail TestItem Analysis', left: 'center', textStyle: { fontSize: 13 } },
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: names, axisLabel: { rotate: 30, fontSize: 11 } },
-    yAxis: [
-      { type: 'value', name: 'Count' },
-      { type: 'value', name: '(%)', max: 100 }
-    ],
-    series: [
-      { type: 'bar', data: counts, itemStyle: { color: '#ff6b6b' } }
-    ]
-  })
 
-  // 右图：分Site堆叠柱状图
-  if (!topFailSiteChart) {
-    topFailSiteChart = echarts.init(topFailSiteChartRef.value)
+  exporting.value = true
+  exportProgress.value = 0
+  
+  // 模拟进度（因为后端是同步生成的）
+  const timer = setInterval(() => {
+    if (exportProgress.value < 95) {
+      exportProgress.value += Math.floor(Math.random() * 5) + 1
+    }
+  }, 500)
+
+  try {
+    const response: any = await api.get(`/analysis/lot/${lotId.value}/export_items`, {
+      params: { 
+        filter_type: options.value.filter_type,
+        sigma: options.value.sigma,
+        data_range: options.value.data_range,
+        chars_row: options.value.chars_row,
+        selected_items: selectedItems
+      },
+      responseType: 'blob'
+    })
+    
+    exportProgress.value = 100
+    setTimeout(() => {
+      const url = window.URL.createObjectURL(new Blob([response.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', `LOT_${lotId.value}_stats_${options.value.filter_type}.xlsx`)
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+      exporting.value = false
+    }, 200)
+  } catch (error) {
+    console.error('Export failed', error)
+    exporting.value = false
+  } finally {
+    clearInterval(timer)
   }
-  const sites = topFail.value.sites
-  const siteSeries = sites.map((site: number, idx: number) => ({
-    type: 'bar',
-    name: `Site${site}`,
-    stack: 'total',
-    data: items.map((item: any) => item.sites[`site${site}`] || 0),
-  }))
-  topFailSiteChart.setOption({
-    title: { text: 'Top Fail TestItem Analysis Per Site', left: 'center', textStyle: { fontSize: 13 } },
-    tooltip: { trigger: 'axis' },
-    legend: { bottom: 0 },
-    xAxis: { type: 'category', data: names, axisLabel: { rotate: 30, fontSize: 11 } },
-    yAxis: { type: 'value', name: 'Count' },
-    series: siteSeries
-  })
 }
 
-function onRowClicked(params: any) {
-  const paramName = params.data.item_name
-  const url = router.resolve(`/lot/${lotId.value}/param/${encodeURIComponent(paramName)}`).href
-  window.open(url, '_blank')
+
+function onCellClicked(params: any) {
+  if (params.colDef.field === 'item_number') {
+    const target = params.event.target as HTMLElement;
+    if (target && !target.closest('.ag-checkbox')) {
+      params.node.setSelected(!params.node.isSelected());
+    }
+    return;
+  }
+
+  const paramName = params.data.item_name;
+  if (paramName) {
+    const url = router.resolve(`/lot/${lotId.value}/param/${encodeURIComponent(paramName)}`).href;
+    window.open(url, '_blank');
+  }
 }
 
-function handleSubmit() {
+watch([
+  () => options.value.filter_type,
+  () => options.value.sigma,
+  () => options.value.data_range
+], () => {
   fetchItems()
-  fetchTopFail()
-}
+})
 
 function yieldColor(val: number) {
   if (!val) return {}
@@ -292,7 +332,6 @@ function formatDate(d: string) {
 onMounted(async () => {
   await fetchLotInfo()
   await fetchItems()
-  await fetchTopFail()
 })
 </script>
 
@@ -408,6 +447,10 @@ onMounted(async () => {
   flex-direction: column;
   gap: 4px;
 }
+.radio-group.row {
+  flex-direction: row;
+  gap: 12px;
+}
 
 .radio-group label {
   font-size: 12px;
@@ -417,10 +460,10 @@ onMounted(async () => {
   gap: 4px;
 }
 
-.submit-btn {
-  background: #1890ff;
-  color: white;
-  border: none;
+.export-btn {
+  background: white;
+  color: #1890ff;
+  border: 1px solid #1890ff;
   border-radius: 4px;
   padding: 8px;
   cursor: pointer;
@@ -428,7 +471,37 @@ onMounted(async () => {
   margin-top: auto;
 }
 
-.submit-btn:hover { background: #40a9ff; }
+.export-btn:hover { background: #f0faff; }
+.export-btn:disabled { opacity: 0.8; cursor: not-allowed; }
+
+.progress-circle {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto;
+}
+.progress-circle svg {
+  width: 100%;
+  height: 100%;
+}
+.circle-bg {
+  fill: none;
+  stroke: #eee;
+  stroke-width: 3.8;
+}
+.circle {
+  fill: none;
+  stroke: #1890ff;
+  stroke-width: 3.8;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.3s ease;
+}
+.percentage {
+  fill: #1890ff;
+  font-family: sans-serif;
+  font-size: 0.5em;
+  text-anchor: middle;
+  font-weight: bold;
+}
 
 .content-area {
   flex: 1;
@@ -458,5 +531,9 @@ onMounted(async () => {
   border-radius: 6px;
   overflow: hidden;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+:deep(.ag-floating-filter-button) {
+  display: none !important;
 }
 </style>

@@ -337,8 +337,9 @@ def merge_lots(data: MergeRequest, db: Session = Depends(get_db)):
     if len(lots) != len(data.ids):
         raise HTTPException(status_code=404, detail="部分LOT不存在")
 
-    # 按 test_date 排序（None 排最后）
-    lots.sort(key=lambda l: l.test_date or datetime.min)
+    # 按 upload_date 排序（时间最早的在前，确保 deduplication 时 keep='last' 保留的是最新的数据）
+    lots.sort(key=lambda l: l.upload_date or datetime.min)
+    print(f"[merge] 合并顺序: {[l.filename for l in lots]}")
 
     # 1. 校验产品名一致
     product_names = set(l.product_name for l in lots if l.product_name)
@@ -375,8 +376,11 @@ def merge_lots(data: MergeRequest, db: Session = Depends(get_db)):
         ((merged_df['X_COORD'] != 0) | (merged_df['Y_COORD'] != 0)).any()
     )
 
-    if has_coords:
-        merged_df = merged_df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
+    # if has_coords:
+    #     # 注意：此处不应进行去重，应保留所有重复坐标的数据行。
+    #     # 因为后续调用 save_stats_to_db 时，它会根据 DataFrame 的顺序自动处理 Original（first）和 Final（last + ever pass）。
+    #     # 如果在这里提前去重，会丢失 Original 数据，导致合并后的 Original 和 Final 数据完全一致。
+    #     pass
 
     # 4. 保存新 parquet
     parquet_dir = os.path.join(UPLOAD_DIR, 'parquet')

@@ -7,10 +7,16 @@ echo "========================================"
 
 # Wait for database to be ready
 echo "[1/4] Waiting for database..."
-DB_HOST=$(echo "$DATABASE_URL" | sed -n 's/.*@\([^:]*\):.*/\1/p')
-DB_PORT=$(echo "$DATABASE_URL" | sed -n 's/.*:\([0-9]*\)\/.*/\1/p')
+
+# Better extraction of host and port from DATABASE_URL
+# Expected format: postgresql://user:pass@host:port/db
+DB_HOST=$(echo "$DATABASE_URL" | sed -e 's|.*@||' -e 's|:.*||' -e 's|/.*||')
+DB_PORT=$(echo "$DATABASE_URL" | sed -e 's|.*:||' -e 's|/.*||')
+
 DB_HOST=${DB_HOST:-db}
 DB_PORT=${DB_PORT:-5432}
+
+echo "  Targeting Database at $DB_HOST:$DB_PORT"
 
 until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "${POSTGRES_USER:-admin}" > /dev/null 2>&1; do
   echo "  Database is unavailable - sleeping"

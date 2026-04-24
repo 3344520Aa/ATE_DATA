@@ -204,9 +204,26 @@ function renderHist() {
       name: unit,
       min: edges[0],
       max: edges[edges.length - 1],
+      axisLine: { onZero: false, show: false },
+      axisTick: { show: true },
+      splitLine: { show: true, lineStyle: { type: 'dashed' } },
       axisLabel: { rotate: 30, fontSize: 10, formatter: (v: number) => v.toFixed(3) },
     },
-    yAxis: { type: 'value', name: 'Parts' },
+    yAxis: {
+      type: 'value',
+      name: 'Parts',
+      nameLocation: 'middle',
+      nameRotate: 90,
+      nameGap: 40,
+      axisLine: {
+        show: true,
+        onZero: false,
+        lineStyle: { color: '#333' }
+      },
+      splitLine: {
+        lineStyle: { type: 'dashed' }
+      }
+    },
     series,
   }, true)
 }

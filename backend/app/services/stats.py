@@ -142,6 +142,136 @@ def calc_param_stats(
         'cpk': round(cpk, 6) if cpk is not None else None,
     }
 
+
+def calc_hist_edges(filtered_all: np.ndarray, ll: Optional[float], ul: Optional[float]) -> tuple:
+    """
+    Calculate global histogram edges and return:
+    (edges, exceeds_limit, ll_bin_index, ul_bin_index)
+    """
+    NUM_BINS = 50
+    if len(filtered_all) > 1:
+        global_min = float(np.min(filtered_all))
+        global_max = float(np.max(filtered_all))
+
+        if global_min == global_max:
+            center = global_min
+            half = abs(center) * 0.5 if center != 0 else 0.5
+            global_min = center - half
+            global_max = center + half
+            _, global_edges = np.histogram(filtered_all, bins=NUM_BINS, range=(global_min, global_max))
+            return global_edges, False, None, None
+            
+        elif ll is not None and ul is not None and ll != ul and (global_min < ll or global_max > ul):
+            # Data exceeds limits, use non-uniform bins
+            exceeds_limit = True
+            n_below = 10
+            n_mid = 30
+            n_above = 10
+            ll_bin_index = n_below
+            ul_bin_index = n_below + n_mid
+
+            left_bound = min(global_min, ll)
+            left_margin = (ul - ll) * 0.03
+            left_bound = left_bound - left_margin
+
+            right_bound = max(global_max, ul)
+            right_margin = (ul - ll) * 0.03
+            right_bound = right_bound + right_margin
+
+            edges_below = np.linspace(left_bound, ll, n_below + 1)
+            edges_mid = np.linspace(ll, ul, n_mid + 1)
+            edges_above = np.linspace(ul, right_bound, n_above + 1)
+
+            global_edges = np.concatenate([edges_below, edges_mid[1:], edges_above[1:]])
+            return global_edges, True, ll_bin_index, ul_bin_index
+        else:
+            _, global_edges = np.histogram(filtered_all, bins=NUM_BINS, range=(global_min, global_max))
+            return global_edges, False, None, None
+    else:
+        global_edges = np.linspace(0, 1, NUM_BINS + 1)
+        return global_edges, False, None, None
+
+
+def calc_hist_x_range(
+    data_min: float, data_max: float,
+    ll: Optional[float], ul: Optional[float],
+    edges_min: Optional[float] = None, edges_max: Optional[float] = None
+) -> dict:
+    """
+    Mirror the frontend calcHistXRange logic for consistent Excel exports.
+    Returns {x_min, x_max, ticks}
+    """
+    has_ll = ll is not None
+    has_ul = ul is not None
+    has_both = has_ll and has_ul
+
+    # Case D: Fixed value (LL == UL and data no change)
+    if data_min == data_max and (not has_both or ll == ul):
+        center = data_min
+        half = abs(center) * 0.5 if center != 0 else 0.5
+        x_min, x_max = center - half, center + half
+        ticks = np.linspace(x_min, x_max, 11)
+        return {"x_min": x_min, "x_max": x_max, "ticks": ticks}
+
+    # Case C: No Limit or LL == UL but data has change
+    if has_both and ll == ul:
+        range_min = edges_min if edges_min is not None else data_min
+        range_max = edges_max if edges_max is not None else data_max
+        padding = (range_max - range_min) * 0.05 or abs(range_max) * 0.01 or 0.1
+        x_min, x_max = range_min - padding, range_max + padding
+        ticks = np.linspace(x_min, x_max, 11)
+        return {"x_min": x_min, "x_max": x_max, "ticks": ticks}
+
+    if has_both:
+        eff_min = edges_min if edges_min is not None else data_min
+        eff_max = edges_max if edges_max is not None else data_max
+        data_exceeds = eff_min < ll or eff_max > ul
+
+        if not data_exceeds:
+            # Case A: Within limits (LL at 10%, UL at 90%)
+            limit_range = ul - ll
+            total_range = limit_range / 0.8
+            x_min = ll - total_range * 0.1
+            x_max = ul + total_range * 0.1
+            ticks = np.linspace(x_min, x_max, 11)
+            return {"x_min": x_min, "x_max": x_max, "ticks": ticks}
+        else:
+            # Case B: Exceeds limits (LL at 20%, UL at 80%)
+            limit_range = ul - ll
+            total_range = limit_range / 0.6
+            center = (ll + ul) / 2
+            x_min = center - total_range / 2
+            x_max = center + total_range / 2
+
+            # Dynamic expansion
+            if eff_min < x_min:
+                x_min = eff_min - (limit_range * 0.05 if eff_min == ll else (ll - eff_min) * 0.1)
+            if eff_max > x_max:
+                x_max = eff_max + (limit_range * 0.05 if eff_max == ul else (eff_max - ul) * 0.1)
+
+            ticks = np.linspace(x_min, x_max, 11)
+            return {"x_min": x_min, "x_max": x_max, "ticks": ticks}
+
+    if has_ll or has_ul:
+        # Case E: Single limit
+        eff_min = edges_min if edges_min is not None else data_min
+        eff_max = edges_max if edges_max is not None else data_max
+        range_min = min(eff_min, ll) if has_ll else eff_min
+        range_max = max(eff_max, ul) if has_ul else eff_max
+        padding = (range_max - range_min) * 0.05 or abs(range_max) * 0.01 or 0.1
+        x_min, x_max = range_min - padding, range_max + padding
+        ticks = np.linspace(x_min, x_max, 11)
+        return {"x_min": x_min, "x_max": x_max, "ticks": ticks}
+
+    # Default Case C: No limits
+    eff_min = edges_min if edges_min is not None else data_min
+    eff_max = edges_max if edges_max is not None else data_max
+    padding = (eff_max - eff_min) * 0.05 or abs(eff_max) * 0.01 or 0.1
+    x_min, x_max = eff_min - padding, eff_max + padding
+    ticks = np.linspace(x_min, x_max, 11)
+    return {"x_min": x_min, "x_max": x_max, "ticks": ticks}
+
+
 def save_stats_to_db(
     lot: Lot,
     parsed: ParsedData,

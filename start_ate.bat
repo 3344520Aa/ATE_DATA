@@ -1,36 +1,59 @@
 @echo off
+setlocal
+
 echo ===================================================
-echo   Chip ATE Analysis System - Development Startup
+echo   Chip ATE Analysis System - Startup Script
 echo ===================================================
 
-:: 1. Start Infrastructure only (DB + Redis)
-echo [1/3] Starting Docker infrastructure (DB + Redis)...
-docker-compose up -d db redis
+:: 1. Check for Docker
+docker --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERROR] Failed to start Docker Compose. Please make sure Docker Desktop is running.
+    echo [ERROR] Docker is not installed or not in PATH.
+    echo Please install Docker Desktop to run this system.
+    pause
+    exit /b 1
+)
+
+:: 2. Check if Docker is running
+docker ps >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] Docker Desktop is not running.
+    echo Please start Docker Desktop and then run this script again.
+    pause
+    exit /b 1
+)
+
+:: 3. Try to start everything
+echo [1/2] Starting all services (DB, Redis, Backend, Frontend)...
+echo This may take a moment...
+docker-compose up -d
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERROR] Failed to start services with Docker Compose. 
+    echo Please check if ports 8000 (Backend) or 5174 (Frontend) are used by other apps.
     pause
     exit /b %errorlevel%
 )
 
-:: 2. Start Backend
-echo [2/3] Starting Backend (FastAPI)...
-start "ATE-Backend" cmd /c "cd /d %~dp0backend && set PYTHONPATH=.&& venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+echo.
+echo [2/2] Checking service status:
+docker-compose ps
 
-:: 3. Start Frontend
-echo [3/3] Starting Frontend (Vue/Vite)...
-start "ATE-Frontend" cmd /c "cd /d %~dp0frontend && npx vite --host 0.0.0.0 --port 5173"
-
-:: 4. Open Browser
 echo.
 echo ===================================================
-echo   System is starting! 
+echo   System is up and running! 
+echo.
+echo   Frontend: http://localhost:5174
 echo   Backend:  http://localhost:8000
-echo   Frontend: http://localhost:5173
+echo.
+echo   Default Login: admin / admin123
 echo ===================================================
 echo.
-echo Press any key to stop the infrastructure (Docker containers)...
+echo Keep this window open while using the system.
+echo Press any key to STOP the services and exit...
 pause
 
-echo Stopping Docker containers...
-docker-compose stop db redis
+echo Stopping services...
+docker-compose stop
 echo Done.
+pause

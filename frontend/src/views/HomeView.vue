@@ -257,7 +257,6 @@ const columnDefs: ColDef[] = [
     width: 220,
     pinned: 'left',
   },
-  { headerName: '产品名', field: 'product_name', width: 140 },
   { headerName: '批号', field: 'lot_id', width: 120 },
   { headerName: '晶圆编号', field: 'wafer_id', width: 100 },
   { headerName: '程序', field: 'program', width: 160 },
@@ -284,6 +283,7 @@ const columnDefs: ColDef[] = [
       width: 140,
       cellRenderer: (p: any) => {
           if (p.value) return p.value
+          if (!p.data) return ''
           return `<span style="color:#1890ff;cursor:pointer" data-id="${p.data.id}" data-program="${p.data.program}">点击设置</span>`
       },
       onCellClicked: (p: any) => {
@@ -318,13 +318,18 @@ function formatSize(bytes: number) {
 }
 
 async function fetchLots() {
-  const params: any = { page: 1, page_size: 200 }
-  if (filters.value.product_name) params.product_name = filters.value.product_name
-  if (filters.value.lot_id) params.lot_id = filters.value.lot_id
-  if (filters.value.status) params.status = filters.value.status
-  const data: any = await api.get('/lots', { params })
-  console.log('fetchLots response:', data)
-  lots.value = data.items
+  try {
+    const params: any = { page: 1, page_size: 200 }
+    if (filters.value.product_name) params.product_name = filters.value.product_name
+    if (filters.value.lot_id) params.lot_id = filters.value.lot_id
+    if (filters.value.status) params.status = filters.value.status
+    const data: any = await api.get('/lots', { params })
+    console.log('fetchLots response:', data)
+    lots.value = data?.items || []
+  } catch (e) {
+    console.error('fetchLots failed:', e)
+    lots.value = []
+  }
 }
 
 async function showProductDialog(row: any) {
