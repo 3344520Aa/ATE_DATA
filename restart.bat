@@ -2,7 +2,15 @@
 setlocal
 
 echo ===================================================
-echo   Chip ATE Analysis System - Startup Script
+echo   Chip ATE Analysis System - Restart Script
+echo ===================================================
+
+:: 0. Stop services first
+echo [0/2] Stopping existing services...
+call stop_ate.bat
+echo.
+echo ===================================================
+echo   Chip ATE Analysis System - Starting Up...
 echo ===================================================
 
 :: 1. Check for Docker

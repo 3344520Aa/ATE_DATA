@@ -69,12 +69,8 @@ def apply_filter(
         return data
 
     elif filter_type == 'filter_by_sigma':
-        n = sigma or 3.0
-        mean = np.mean(data)
-        std = np.std(data, ddof=1)
-        if std == 0:
-            return data
-        return data[(data >= mean - n * std) & (data <= mean + n * std)]
+        # 按 sigma 筛选时不改变极值，仅通过更新 limit 并重新统计，这里不实际过滤数据
+        return data
 
     elif filter_type == 'custom':
         if custom_min is not None:

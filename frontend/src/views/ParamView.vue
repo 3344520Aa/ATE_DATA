@@ -69,6 +69,10 @@
             <input v-model.number="customMinInput" type="number" step="any" style="width:90px" />
             <label>Max</label>
             <input v-model.number="customMaxInput" type="number" step="any" style="width:90px" />
+            <label>LL</label>
+            <input v-model.number="customLLInput" type="number" step="any" style="width:90px" />
+            <label>UL</label>
+            <input v-model.number="customULInput" type="number" step="any" style="width:90px" />
             <button @click="applyCustomRange">Apply</button>
           </div>
 
@@ -117,8 +121,8 @@
                   <td>{{ s.stats.fail_count }}</td>
                   <td>{{ s.stats.exec_qty }}</td>
                   <td>{{ s.stats.yield_rate ? (s.stats.yield_rate * 100).toFixed(2) + '%' : '-' }}</td>
-                  <td>{{ currentTab.data.lower_limit ?? '-' }}</td>
-                  <td>{{ currentTab.data.upper_limit ?? '-' }}</td>
+                  <td>{{ currentTab.data.lower_limit?.toFixed(4) ?? '-' }}</td>
+                  <td>{{ currentTab.data.upper_limit?.toFixed(4) ?? '-' }}</td>
                   <td>{{ s.stats.min_val?.toFixed(4) ?? '-' }}</td>
                   <td>{{ s.stats.max_val?.toFixed(4) ?? '-' }}</td>
                   <td>{{ s.stats.mean?.toFixed(4) ?? '-' }}</td>
@@ -237,6 +241,8 @@ const draftOptions = ref({
   sigma: 3,
   custom_min: null as number | null,
   custom_max: null as number | null,
+  custom_ll: null as number | null,
+  custom_ul: null as number | null,
   show_histogram: true,
   show_scatter: true,
   show_map: true,
@@ -245,12 +251,16 @@ const draftOptions = ref({
 const sigmaInputValue = ref(draftOptions.value.sigma)
 const customMinInput = ref<number | null>(null)
 const customMaxInput = ref<number | null>(null)
+const customLLInput = ref<number | null>(null)
+const customULInput = ref<number | null>(null)
 
 watch(currentTab, (newTab) => {
   if (newTab) {
     sigmaInputValue.value = newTab.options.sigma
     customMinInput.value = newTab.options.custom_min
     customMaxInput.value = newTab.options.custom_max
+    customLLInput.value = newTab.options.custom_ll
+    customULInput.value = newTab.options.custom_ul
     currentParamName.value = newTab.param_name
   }
 }, { immediate: true })
@@ -280,6 +290,10 @@ async function updateFilterType(value: string) {
       currentTab.value.options.custom_min = allSite.stats.min_val
       currentTab.value.options.custom_max = allSite.stats.max_val
     }
+    customLLInput.value = currentTab.value.data.lower_limit
+    customULInput.value = currentTab.value.data.upper_limit
+    currentTab.value.options.custom_ll = currentTab.value.data.lower_limit
+    currentTab.value.options.custom_ul = currentTab.value.data.upper_limit
   }
   await loadTabData(currentTab.value.id)
 }
@@ -294,6 +308,8 @@ function applyCustomRange() {
   if (!currentTab.value) return
   currentTab.value.options.custom_min = customMinInput.value
   currentTab.value.options.custom_max = customMaxInput.value
+  currentTab.value.options.custom_ll = customLLInput.value
+  currentTab.value.options.custom_ul = customULInput.value
   loadTabData(currentTab.value.id)
 }
 
@@ -437,6 +453,8 @@ async function fetchParamData(paramName: string, options: any) {
       data_range: options.data_range,
       custom_min: options.filter_type === 'custom' ? options.custom_min : undefined,
       custom_max: options.filter_type === 'custom' ? options.custom_max : undefined,
+      custom_ll: options.filter_type === 'custom' ? options.custom_ll : undefined,
+      custom_ul: options.filter_type === 'custom' ? options.custom_ul : undefined,
     }
   })
 }
@@ -454,6 +472,8 @@ function addTab() {
     if (currentTab.value.param_name !== paramName) {
       optionsToUse.custom_min = null
       optionsToUse.custom_max = null
+      optionsToUse.custom_ll = null
+      optionsToUse.custom_ul = null
     }
   } else {
     optionsToUse = { ...draftOptions.value }
@@ -489,6 +509,10 @@ async function loadTabData(tabId: string) {
       customMinInput.value = allSite.stats.min_val
       customMaxInput.value = allSite.stats.max_val
     }
+    tab.options.custom_ll = data.lower_limit
+    tab.options.custom_ul = data.upper_limit
+    customLLInput.value = data.lower_limit
+    customULInput.value = data.upper_limit
   }
 
   await nextTick()
@@ -720,14 +744,14 @@ function renderHistogram(tabId: string) {
     if (ll !== null && ll !== undefined) {
       markLineData.push({
         xAxis: ll_bin_index,
-        label: { formatter: `LL:${ll}`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: 'red', rotate: 0 },
+        label: { formatter: `LL:${ll.toFixed(4)}`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: 'red', rotate: 0 },
         lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
       })
     }
     if (ul !== null && ul !== undefined) {
       markLineData.push({
         xAxis: ul_bin_index,
-        label: { formatter: `UL:${ul}`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: 'red', rotate: 0 },
+        label: { formatter: `UL:${ul.toFixed(4)}`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: 'red', rotate: 0 },
         lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
       })
     }
@@ -745,12 +769,12 @@ function renderHistogram(tabId: string) {
       }
       markLineData.push({
         xAxis: findBinIndex(sigmaL),
-        label: { formatter: `${n}σL`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: '#00c853', rotate: 0 },
+        label: { formatter: `${n}σL`, position: '70%', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: '#00c853', rotate: 0 },
         lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
       })
       markLineData.push({
         xAxis: findBinIndex(sigmaU),
-        label: { formatter: `${n}σU`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: '#00c853', rotate: 0 },
+        label: { formatter: `${n}σU`, position: '70%', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: '#00c853', rotate: 0 },
         lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
       })
     }
@@ -807,8 +831,8 @@ function renderHistogram(tabId: string) {
           formatter: (_: string, index: number) => {
             if (labelPositions.has(index)) {
               // 在 LL 和 UL 位置显示 limit 值
-              if (index === ll_bin_index && ll != null) return `LL:${ll}`
-              if (index === ul_bin_index && ul != null) return `UL:${ul}`
+              if (index === ll_bin_index && ll != null) return `LL:${ll.toFixed(4)}`
+              if (index === ul_bin_index && ul != null) return `UL:${ul.toFixed(4)}`
               return edges[index]?.toFixed(3) ?? ''
             }
             return ''
@@ -890,14 +914,14 @@ function renderHistogram(tabId: string) {
     if (ll !== null && ll !== undefined) {
       markLineData.push({
         xAxis: ll,
-        label: { formatter: `LL:${ll}`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: 'red', rotate: 0 },
+        label: { formatter: `LL:${ll.toFixed(4)}`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: 'red', rotate: 0 },
         lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
       })
     }
     if (ul !== null && ul !== undefined) {
       markLineData.push({
         xAxis: ul,
-        label: { formatter: `UL:${ul}`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: 'red', rotate: 0 },
+        label: { formatter: `UL:${ul.toFixed(4)}`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: 'red', rotate: 0 },
         lineStyle: { color: 'red', type: 'dashed', width: 1.5 },
       })
     }
@@ -908,12 +932,12 @@ function renderHistogram(tabId: string) {
       const sigmaU = allSiteStats.mean + n * allSiteStats.stdev
       markLineData.push({
         xAxis: sigmaL,
-        label: { formatter: `${n}σL`, position: 'middle', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: '#00c853', rotate: 0 },
+        label: { formatter: `${n}σL`, position: '70%', align: 'left', padding: [0, 0, 0, 8], fontSize: 10, color: '#00c853', rotate: 0 },
         lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
       })
       markLineData.push({
         xAxis: sigmaU,
-        label: { formatter: `${n}σU`, position: 'middle', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: '#00c853', rotate: 0 },
+        label: { formatter: `${n}σU`, position: '70%', align: 'right', padding: [0, 8, 0, 0], fontSize: 10, color: '#00c853', rotate: 0 },
         lineStyle: { color: '#00c853', type: 'dashed', width: 1.5 },
       })
     }
@@ -1034,14 +1058,26 @@ function renderScatter(tabId: string) {
       data: [
         ...(ll !== null && ll !== undefined ? [{
           yAxis: ll,
-          label: { formatter: `LL:${ll}`, position: 'end' },
+          label: { formatter: `LL:${ll.toFixed(4)}`, position: 'end' },
           lineStyle: { color: 'red', type: 'dashed' },
         }] : []),
         ...(ul !== null && ul !== undefined ? [{
           yAxis: ul,
-          label: { formatter: `UL:${ul}`, position: 'end' },
+          label: { formatter: `UL:${ul.toFixed(4)}`, position: 'end' },
           lineStyle: { color: 'red', type: 'dashed' },
         }] : []),
+        ...(tab.options.filter_type === 'filter_by_sigma' && allSiteStats?.mean != null && allSiteStats?.stdev != null ? [
+          {
+            yAxis: allSiteStats.mean - (tab.options.sigma ?? 3) * allSiteStats.stdev,
+            label: { formatter: `${tab.options.sigma ?? 3}σL`, position: '70%', align: 'left', padding: [0, 0, 0, 8], color: '#00c853' },
+            lineStyle: { color: '#00c853', type: 'dashed' },
+          },
+          {
+            yAxis: allSiteStats.mean + (tab.options.sigma ?? 3) * allSiteStats.stdev,
+            label: { formatter: `${tab.options.sigma ?? 3}σU`, position: '70%', align: 'right', padding: [0, 8, 0, 0], color: '#00c853' },
+            lineStyle: { color: '#00c853', type: 'dashed' },
+          }
+        ] : []),
       ],
     },
   })

@@ -215,8 +215,8 @@ function handleLogout() {
 
 .content {
   flex: 1;
-  overflow: auto;
-  padding: 20px;
+  overflow: hidden;
+  padding: 0;
 }
 
 /* AI 悬浮框 */

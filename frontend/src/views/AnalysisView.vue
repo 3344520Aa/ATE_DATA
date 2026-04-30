@@ -42,12 +42,23 @@
         <div class="info-item">
             <span class="label">测试日期</span>
             <span class="value">{{ formatDate(lotInfo.test_date) }}</span>
-        </div>     
+        </div>
+        <div class="info-item-actions">
+          <button class="btn-bin" @click="router.push(`/lot/${lotId}/bin`)">📊 BIN分析</button>
+          <button 
+            class="btn-bin" 
+            :disabled="exporting" 
+            @click="handleExport"
+            :style="exporting ? { 
+              background: `linear-gradient(to right, #52c41a ${exportProgress}%, #73d13d ${exportProgress}%)`,
+              transition: 'background 0.3s'
+            } : {}"
+          >
+            <template v-if="!exporting">📁 导出 Excel</template>
+            <template v-else>导出中 {{ exportProgress }}%</template>
+          </button>
+        </div>
       </div>
-      <div class="info-actions">
-        <button class="btn-bin" @click="router.push(`/lot/${lotId}/bin`)">📊 BIN分析</button>
-      </div>
-
     </div>
 
     <!-- 主体：左侧Options + 右侧图表 + 底部表格 -->
@@ -88,16 +99,7 @@
           </div>
         </div>
 
-        <button class="export-btn" :disabled="exporting" @click="handleExport">
-          <template v-if="!exporting">导出 Excel</template>
-          <div v-else class="progress-circle">
-            <svg viewBox="0 0 36 36">
-              <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-              <path class="circle" :style="{ strokeDasharray: `${exportProgress}, 100` }" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-              <text x="18" y="20.35" class="percentage">{{ exportProgress }}%</text>
-            </svg>
-          </div>
-        </button>
+
       </div>
 
       <!-- 右侧内容区 -->
@@ -253,42 +255,66 @@ async function handleExport() {
   exporting.value = true
   exportProgress.value = 0
   
-  // 模拟进度（因为后端是同步生成的）
-  const timer = setInterval(() => {
-    if (exportProgress.value < 95) {
-      exportProgress.value += Math.floor(Math.random() * 5) + 1
-    }
-  }, 500)
-
   try {
-    const response: any = await api.get(`/analysis/lot/${lotId.value}/export_items`, {
+    // 1. 启动导出任务
+    const startRes: any = await api.post(`/analysis/lot/${lotId.value}/export_items/start`, null, {
       params: { 
         filter_type: options.value.filter_type,
         sigma: options.value.sigma,
         data_range: options.value.data_range,
         chars_row: options.value.chars_row,
         selected_items: selectedItems
-      },
-      responseType: 'blob'
+      }
     })
     
-    exportProgress.value = 100
-    setTimeout(() => {
-      const url = window.URL.createObjectURL(new Blob([response.data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', `LOT_${lotId.value}_stats_${options.value.filter_type}.xlsx`)
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-      window.URL.revokeObjectURL(url)
-      exporting.value = false
-    }, 200)
+    const taskId = startRes.task_id
+
+    // 2. 轮询进度
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes: any = await api.get(`/analysis/export_items/status/${taskId}`)
+        const { status, progress, error } = statusRes
+        
+        if (status === 'completed') {
+          clearInterval(pollInterval)
+          exportProgress.value = 100
+          
+          // 3. 下载文件
+          const downloadRes: any = await api.get(`/analysis/export_items/download/${taskId}`, {
+            responseType: 'blob'
+          })
+          
+          const url = window.URL.createObjectURL(new Blob([downloadRes.data]))
+          const link = document.createElement('a')
+          link.href = url
+          link.setAttribute('download', `LOT_${lotId.value}_Report_${options.value.filter_type}.xlsx`)
+          document.body.appendChild(link)
+          link.click()
+          document.body.removeChild(link)
+          window.URL.revokeObjectURL(url)
+          
+          setTimeout(() => {
+            exporting.value = false
+          }, 1000)
+        } else if (status === 'failed') {
+          clearInterval(pollInterval)
+          console.error('Export failed:', error)
+          alert('导出失败: ' + error)
+          exporting.value = false
+        } else {
+          exportProgress.value = progress
+        }
+      } catch (err) {
+        clearInterval(pollInterval)
+        console.error('Polling failed:', err)
+        exporting.value = false
+      }
+    }, 1000)
+
   } catch (error) {
-    console.error('Export failed', error)
+    console.error('Export failed to start', error)
+    alert('启动导出失败')
     exporting.value = false
-  } finally {
-    clearInterval(timer)
   }
 }
 
@@ -348,8 +374,12 @@ onMounted(async () => {
   align-items: center;
 }
 
-.info-actions {
-  flex-shrink: 0;
+.info-item-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-left: 24px;
+  padding-bottom: 2px;
 }
 
 .btn-bin {
@@ -460,48 +490,7 @@ onMounted(async () => {
   gap: 4px;
 }
 
-.export-btn {
-  background: white;
-  color: #1890ff;
-  border: 1px solid #1890ff;
-  border-radius: 4px;
-  padding: 8px;
-  cursor: pointer;
-  font-size: 13px;
-  margin-top: auto;
-}
 
-.export-btn:hover { background: #f0faff; }
-.export-btn:disabled { opacity: 0.8; cursor: not-allowed; }
-
-.progress-circle {
-  width: 28px;
-  height: 28px;
-  margin: 0 auto;
-}
-.progress-circle svg {
-  width: 100%;
-  height: 100%;
-}
-.circle-bg {
-  fill: none;
-  stroke: #eee;
-  stroke-width: 3.8;
-}
-.circle {
-  fill: none;
-  stroke: #1890ff;
-  stroke-width: 3.8;
-  stroke-linecap: round;
-  transition: stroke-dasharray 0.3s ease;
-}
-.percentage {
-  fill: #1890ff;
-  font-family: sans-serif;
-  font-size: 0.5em;
-  text-anchor: middle;
-  font-weight: bold;
-}
 
 .content-area {
   flex: 1;

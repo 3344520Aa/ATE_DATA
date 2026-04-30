@@ -219,16 +219,19 @@ const defaultColDef: ColDef = {
   resizable: true,
   sortable: true,
   filter: true,
-  minWidth: 80,
+  minWidth: 40,
 }
 
 const columnDefs: ColDef[] = [
-  { checkboxSelection: true, headerCheckboxSelection: true, width: 48, pinned: 'left' },
-  { headerName: '序号', valueGetter: 'node.rowIndex + 1', width: 70, pinned: 'left' },
+  { checkboxSelection: true, headerCheckboxSelection: true, width: 40, pinned: 'left', filter: false, sortable: false, suppressMenu: true },
+  { headerName: '序号', valueGetter: 'node.rowIndex + 1', width: 60, pinned: 'left', filter: false, sortable: false, suppressMenu: true },
   {
     headerName: '操作',
     width: 140,
     pinned: 'left',
+    filter: false,
+    sortable: false,
+    suppressMenu: true,
     cellRenderer: (p: any) => {
       return `
         <div style="display:flex;gap:6px;align-items:center;height:100%">
@@ -254,12 +257,12 @@ const columnDefs: ColDef[] = [
   {
     headerName: '文件名',
     field: 'filename',
-    width: 220,
+    width: 350,
     pinned: 'left',
   },
-  { headerName: '批号', field: 'lot_id', width: 120 },
-  { headerName: '晶圆编号', field: 'wafer_id', width: 100 },
-  { headerName: '程序', field: 'program', width: 160 },
+  { headerName: '批号', field: 'lot_id', width: 130 },
+  { headerName: '晶圆编号', field: 'wafer_id', width: 130 },
+  { headerName: '程序', field: 'program', width: 300 },
   { headerName: '测试机', field: 'test_machine', width: 100 },
   { headerName: 'Data Type', field: 'data_type', width: 100 },
   { headerName: '测试项', field: 'item_count', width: 80 },

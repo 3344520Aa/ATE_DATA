@@ -53,7 +53,7 @@
         <label><input type="checkbox" v-model="options.show_fail_bin" @change="renderFailBinChart" /> Fail Bin Analysis</label>
       </div>
 
-      <button class="export-btn" @click="handleExport">Export Report</button>
+      <button class="export-btn" @click="handleExport">📁 导出 Excel</button>
     </div>
 
     <!-- Bin汇总表格 -->
@@ -1089,12 +1089,16 @@ onMounted(async () => {
 
 .export-btn {
   margin-left: 100px;
-  background: white;
-  border: 1px solid #d9d9d9;
+  background: #52c41a;
+  color: white;
+  border: none;
   border-radius: 4px;
-  padding: 5px 14px;
+  padding: 6px 16px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
+}
+.export-btn:hover {
+  background: #73d13d;
 }
 
 .bin-table-area {

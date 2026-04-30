@@ -12,9 +12,15 @@ from app.core.database import get_db
 from app.models.test_item import TestItem
 from app.models.bin_summary import BinSummary
 from app.models.lot import Lot
+from fastapi import BackgroundTasks
+import uuid
+import time
 # 延后导入，防止环境缺少依赖导致后端无法启动
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
+
+# 全局存储导出任务状态 (生产环境建议使用 Redis)
+export_tasks = {}
 
 @router.get("/lot/{lot_id}/items_summary")
 def get_test_items_summary(
@@ -71,7 +77,561 @@ def get_test_items_summary(
 
     return result
 
-@router.get("/lot/{lot_id}/export_items")
+@router.post("/lot/{lot_id}/export_items/start")
+def start_export_test_items(
+    lot_id: int,
+    background_tasks: BackgroundTasks,
+    filter_type: str = Query("all"),
+    sigma: float = Query(3.0),
+    data_range: str = Query("final"),
+    chars_row: int = Query(3),
+    selected_items: str = Query(""),
+    db: Session = Depends(get_db),
+):
+    """启动异步导出任务"""
+    task_id = str(uuid.uuid4())
+    export_tasks[task_id] = {
+        "status": "processing",
+        "progress": 0,
+        "result": None,
+        "filename": f"LOT_{lot_id}_FullReport_{filter_type}.xlsx",
+        "created_at": time.time()
+    }
+    
+    background_tasks.add_task(
+        run_export_task,
+        task_id, lot_id, filter_type, sigma, data_range, chars_row, selected_items, db
+    )
+    
+    return {"task_id": task_id}
+
+@router.get("/export_items/status/{task_id}")
+def get_export_status(task_id: str):
+    """查询导出任务进度"""
+    if task_id not in export_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task = export_tasks[task_id]
+    return {
+        "status": task["status"],
+        "progress": task["progress"],
+        "error": task.get("error")
+    }
+
+@router.get("/export_items/download/{task_id}")
+def download_export_result(task_id: str):
+    """下载导出结果"""
+    if task_id not in export_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task = export_tasks[task_id]
+    if task["status"] != "completed":
+        raise HTTPException(status_code=400, detail="任务尚未完成")
+    
+    # 这里的 result 是 BytesIO 对象
+    result = task["result"]
+    result.seek(0)
+    
+    return StreamingResponse(
+        result,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={task['filename']}"}
+    )
+
+def run_export_task(
+    task_id: str,
+    lot_id: int,
+    filter_type: str,
+    sigma: float,
+    data_range: str,
+    chars_row: int,
+    selected_items: str,
+    db: Session
+):
+    """后台执行导出任务"""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import xlsxwriter
+        import pandas as pd
+        import io
+        import numpy as np
+
+        export_tasks[task_id]["progress"] = 5
+        
+        lot = db.query(Lot).filter(Lot.id == lot_id).first()
+        if not lot:
+            export_tasks[task_id].update({"status": "failed", "error": "LOT不存在"})
+            return
+
+        # 1. 获取数据
+        lot_info = get_lot_info(lot_id, db)
+        items_summary = get_test_items_summary(lot_id, filter_type, sigma, data_range, db)
+        
+        if selected_items:
+            try:
+                sel_nums = [int(x.strip()) for x in selected_items.split(',') if x.strip()]
+                if sel_nums:
+                    items_summary = [it for it in items_summary if it['item_number'] in sel_nums]
+            except ValueError:
+                pass
+
+        bin_data = get_bin_summary(lot_id, data_range, "all", db)
+        map_result = get_wafer_bin_map(lot_id, data_range, "all", db)
+
+        export_tasks[task_id]["progress"] = 10
+
+        # 预读数据
+        df_all = pd.read_parquet(lot.parquet_path)
+        if 'X_COORD' in df_all.columns and 'Y_COORD' in df_all.columns:
+            if data_range == 'final':
+                df_all = df_all.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
+            elif data_range == 'original':
+                df_all = df_all.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            
+            # ─── Sheet 1: Stats & Info ───
+            stats_sheet = workbook.add_worksheet('Stats')
+            
+            # 定义格式
+            info_label_fmt = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#F2F2F2', 'align': 'left'})
+            info_val_fmt = workbook.add_format({'border': 1, 'align': 'left'})
+            
+            info_labels = {
+                "filename": "名称", "program": "程序", "test_machine": "测试机",
+                "station_count": "工位数", "die_count": "测试数量",
+                "yield_rate": "良率", "data_type": "测试阶段", "test_date": "测试日期"
+            }
+            row = 0
+            for key, label in info_labels.items():
+                val = lot_info.get(key)
+                if key == 'yield_rate' and val is not None:
+                    val = f"{val*100:.2f}%"
+                elif key == 'test_date' and val:
+                    try:
+                        from datetime import datetime
+                        if isinstance(val, str):
+                            val = datetime.fromisoformat(val).strftime('%Y-%m-%d %H:%M:%S')
+                    except: pass
+                stats_sheet.write(row, 0, label, info_label_fmt)
+                stats_sheet.write(row, 1, str(val) if val is not None else "", info_val_fmt)
+                row += 1
+            
+            row += 2 # 空两行
+            df_stats = pd.DataFrame(items_summary)
+            if not df_stats.empty:
+                column_mapping = {
+                    'item_number': '#', 'item_name': 'TestItem', 'lower_limit': 'L.Limit',
+                    'upper_limit': 'U.Limit', 'unit': 'Units', 'min_val': 'Min',
+                    'max_val': 'Max', 'exec_qty': 'Exec Qty', 'fail_count': 'Failures',
+                    'fail_rate': 'Fail Rate', 'yield_rate': 'Yield', 'mean': 'Mean',
+                    'stdev': 'Stdev', 'cpu': 'CPU', 'cpl': 'CPL', 'cpk': 'CPK'
+                }
+                existing_cols = [c for c in column_mapping.keys() if c in df_stats.columns]
+                df_stats = df_stats[existing_cols].rename(columns=column_mapping)
+                if 'Fail Rate' in df_stats.columns:
+                    df_stats['Fail Rate'] = df_stats['Fail Rate'].apply(lambda x: float(x) if pd.notna(x) else 0.0)
+                if 'Yield' in df_stats.columns:
+                    df_stats['Yield'] = df_stats['Yield'].apply(lambda x: float(x) if pd.notna(x) else None)
+
+                
+                # 写入参数统计表并应用格式
+                start_stats_row = row
+                num_rows = len(df_stats)
+                num_cols = len(df_stats.columns)
+                
+                for r_idx in range(num_rows + 1): # +1 为表头
+                    for c_idx in range(num_cols):
+                        is_header = (r_idx == 0)
+                        col_name = df_stats.columns[c_idx]
+                        is_test_item = (col_name == 'TestItem')
+                        
+                        fmt_props = {'border': 1, 'valign': 'vcenter'}
+                        
+                        # 粗外侧框线
+                        if r_idx == 0: fmt_props['top'] = 2
+                        if r_idx == num_rows: fmt_props['bottom'] = 2
+                        if c_idx == 0: fmt_props['left'] = 2
+                        if c_idx == num_cols - 1: fmt_props['right'] = 2
+                        
+                        if is_header:
+                            fmt_props.update({'bold': True, 'align': 'center', 'bg_color': '#D9D9D9'})
+                            val = col_name
+                        else:
+                            fmt_props['align'] = 'left' if is_test_item else 'center'
+                            val = df_stats.iloc[r_idx - 1, c_idx]
+                            if pd.isna(val): val = ""
+                            if col_name in ['Fail Rate', 'Yield'] and isinstance(val, (int, float)):
+                                fmt_props['num_format'] = '0.00%'
+                            
+                            # CPK/CPU/CPL 染色逻辑
+                            if col_name in ['CPU', 'CPL', 'CPK'] and isinstance(val, (int, float)):
+                                if val < 1.0:
+                                    fmt_props.update({'font_color': 'red', 'bold': True})
+                                elif val < 1.33:
+                                    fmt_props.update({'font_color': '#FF8C00'}) # Orange
+
+                        
+                        cell_fmt = workbook.add_format(fmt_props)
+                        stats_sheet.write(start_stats_row + r_idx, c_idx, val, cell_fmt)
+
+                
+                # 设置列宽
+                stats_sheet.set_column(0, 0, 8)   # #
+                stats_sheet.set_column(1, 1, 40)  # TestItem 40宽
+                if num_cols > 2:
+                    stats_sheet.set_column(2, num_cols - 1, 12) # 其余居中
+
+
+            export_tasks[task_id]["progress"] = 15
+
+            # ─── Sheet 2: Histograms ───
+            hist_sheet = workbook.add_worksheet('Histograms')
+            hist_sheet.set_column(0, 0, 10)
+            hist_sheet.set_column(1, 1, 30)
+            hist_sheet.set_column(2, 50, 10)
+            
+            header_format = workbook.add_format({'bold': True, 'font_color': 'blue'})
+            hist_sheet.write(0, 2, "Data:", header_format)
+            hist_sheet.write(0, 3, lot.filename, header_format)
+            hist_sheet.write(1, 2, "Wafer:", header_format)
+            hist_sheet.write(1, 3, lot.wafer_id, header_format)
+            
+            from app.services.stats import apply_filter, calc_param_stats, calc_hist_edges, calc_hist_x_range
+            
+            def draw_stats_line(ax_obj, y_pos, items_list):
+                # 拼接统计信息为单行，用3个空格分隔
+                line_text = "   ".join([f"{k}{v}" for k, v in items_list])
+                ax_obj.text(0.5, y_pos, line_text, transform=ax_obj.transAxes, 
+                            color='#000000', fontweight='bold', fontsize=8, ha='center')
+
+            fig, ax = plt.subplots(figsize=(5.47, 4.5)) 
+            SITE_COLORS = ['#ff6b6b', '#4dabf7', '#69db7c', '#ffd43b', '#e599f7', '#74c0fc', '#a9e34b', '#ffa94d']
+            
+            total_items = len(items_summary)
+            for i, item in enumerate(items_summary):
+                # 更新进度: 15% -> 80%
+                current_progress = 15 + int((i / total_items) * 65) if total_items > 0 else 15
+                export_tasks[task_id]["progress"] = current_progress
+
+                p_name = item['item_name']
+                p_num = item['item_number']
+                if p_name not in df_all.columns: continue
+                
+                ll, ul = item.get('lower_limit'), item.get('upper_limit')
+                unit = item.get('unit') or ''
+                vals = df_all[p_name].dropna().values.astype(float)
+                if len(vals) == 0: continue
+                filtered_all = apply_filter(vals, filter_type, ll, ul, sigma)
+                if len(filtered_all) == 0: continue
+                edges, exceeds_limit, ll_bin_idx, ul_bin_idx = calc_hist_edges(filtered_all, ll, ul)
+                
+                sites_data = []
+                if 'SITE_NUM' in df_all.columns:
+                    site_groups = df_all.dropna(subset=[p_name]).groupby('SITE_NUM')
+                    for site_num, site_df in site_groups:
+                        if site_num == 0: continue
+                        site_vals = site_df[p_name].values.astype(float)
+                        site_filtered = apply_filter(site_vals, filter_type, ll, ul, sigma)
+                        if len(site_filtered) > 0:
+                            counts, _ = np.histogram(site_filtered, bins=edges)
+                            sites_data.append({'site': int(site_num), 'counts': counts})
+                if not sites_data:
+                    counts, _ = np.histogram(filtered_all, bins=edges)
+                    sites_data.append({'site': 0, 'counts': counts})
+
+                ax.clear()
+                ax.set_axisbelow(True)
+                ax.yaxis.grid(True, linestyle='--', alpha=0.5, zorder=0)
+                s0_stats = calc_param_stats(filtered_all, ll, ul, len(filtered_all))
+                data_min, data_max = float(np.min(filtered_all)), float(np.max(filtered_all))
+                edges_min, edges_max = float(edges[0]), float(edges[-1])
+                x_range_info = calc_hist_x_range(data_min, data_max, ll, ul, edges_min, edges_max)
+                x_min, x_max = x_range_info['x_min'], x_range_info['x_max']
+                
+                if exceeds_limit:
+                    max_count = np.max([np.max(s['counts']) for s in sites_data]) if sites_data else 1
+                    min_h = max_count * 0.02
+                    outlier_h = max_count * 0.05
+                    for idx, s in enumerate(sites_data):
+                        color = SITE_COLORS[idx % len(SITE_COLORS)]
+                        sigma_l = s0_stats['mean'] - 6 * s0_stats['stdev'] if s0_stats.get('mean') is not None and s0_stats.get('stdev') is not None else None
+                        sigma_u = s0_stats['mean'] + 6 * s0_stats['stdev'] if s0_stats.get('mean') is not None and s0_stats.get('stdev') is not None else None
+                        final_normal, final_outlier = [], []
+                        for i_bin, cnt in enumerate(s['counts']):
+                            center = (edges[i_bin] + edges[i_bin+1]) / 2
+                            is_outlier_type = sigma_l is not None and (center < sigma_l or center > sigma_u) and 0 < cnt < 5
+                            if is_outlier_type:
+                                final_normal.append(0); final_outlier.append(max(cnt, outlier_h))
+                            elif cnt > 0:
+                                val = max(cnt, min_h) if cnt < 5 else cnt
+                                final_normal.append(val); final_outlier.append(0)
+                            else:
+                                final_normal.append(0); final_outlier.append(0)
+                        bar_w = 0.9
+                        ax.bar(range(len(final_normal)), final_normal, width=bar_w, alpha=0.7, color=color, label=f"Site{s['site']}", zorder=3)
+                        if any(v > 0 for v in final_outlier):
+                            ax.bar(range(len(final_outlier)), final_outlier, width=bar_w, alpha=0.8, color=color, zorder=4)
+                    if ll_bin_idx is not None:
+                        ax.axvline(ll_bin_idx, color='red', linestyle='--', linewidth=1.5, zorder=4)
+                        ax.text(ll_bin_idx, ax.get_ylim()[1]*0.5, f'LL:{ll}', color='red', fontsize=7, ha='left', va='center', rotation=90)
+                    if ul_bin_idx is not None:
+                        ax.axvline(ul_bin_idx, color='red', linestyle='--', linewidth=1.5, zorder=4)
+                        ax.text(ul_bin_idx, ax.get_ylim()[1]*0.5, f'UL:{ul}', color='red', fontsize=7, ha='right', va='center', rotation=90)
+                    tick_indices = np.linspace(0, len(edges)-2, 11).astype(int)
+                    ax.set_xticks(tick_indices)
+                    ax.set_xticklabels([f"{edges[t]:.3f}" for t in tick_indices], rotation=30)
+                else:
+                    bin_centers = (edges[:-1] + edges[1:]) / 2
+                    bin_w = edges[1] - edges[0] if len(edges) > 1 else 1
+                    max_count = np.max([np.max(s['counts']) for s in sites_data]) if sites_data else 1
+                    min_h = max_count * 0.02
+                    outlier_h = max_count * 0.05
+                    for idx, s in enumerate(sites_data):
+                        color = SITE_COLORS[idx % len(SITE_COLORS)]
+                        sigma_l = s0_stats['mean'] - 6 * s0_stats['stdev'] if s0_stats.get('mean') is not None and s0_stats.get('stdev') is not None else None
+                        sigma_u = s0_stats['mean'] + 6 * s0_stats['stdev'] if s0_stats.get('mean') is not None and s0_stats.get('stdev') is not None else None
+                        final_normal, final_outlier = [], []
+                        for i_bin, cnt in enumerate(s['counts']):
+                            center = (edges[i_bin] + edges[i_bin+1]) / 2
+                            is_outlier_type = sigma_l is not None and (center < sigma_l or center > sigma_u) and 0 < cnt < 5
+                            if is_outlier_type:
+                                final_normal.append(0); final_outlier.append(max(cnt, outlier_h))
+                            elif cnt > 0:
+                                val = max(cnt, min_h) if cnt < 5 else cnt
+                                final_normal.append(val); final_outlier.append(0)
+                            else:
+                                final_normal.append(0); final_outlier.append(0)
+                        bar_w = max(bin_w * 0.9, (x_max - x_min) * 0.015)
+                        ax.bar(bin_centers, final_normal, width=bar_w, alpha=0.7, color=color, label=f"Site{s['site']}", zorder=3)
+                        if any(v > 0 for v in final_outlier):
+                            ax.bar(bin_centers, final_outlier, width=bar_w, alpha=0.8, color=color, zorder=4)
+                    ax.set_xlim(x_min, x_max)
+                    if ll is not None:
+                        ax.axvline(ll, color='red', linestyle='--', linewidth=1.5, zorder=4)
+                        ax.text(ll, ax.get_ylim()[1]*0.5, f'LL:{ll}', color='red', fontsize=7, ha='left', va='center', rotation=90)
+                    if ul is not None:
+                        ax.axvline(ul, color='red', linestyle='--', linewidth=1.5, zorder=4)
+                        ax.text(ul, ax.get_ylim()[1]*0.5, f'UL:{ul}', color='red', fontsize=7, ha='right', va='center', rotation=90)
+                    ax.set_xticks(x_range_info['ticks'])
+                    ax.xaxis.set_major_formatter(plt.FormatStrFormatter('%.3f'))
+                    ax.tick_params(axis='x', rotation=30)
+                
+                if filter_type == 'filter_by_sigma':
+                    sigma_val = float(sigma) if sigma else 3.0
+                    sigma_l, sigma_u = s0_stats['mean'] - sigma_val * s0_stats['stdev'], s0_stats['mean'] + sigma_val * s0_stats['stdev']
+                    if exceeds_limit:
+                        def find_bin(val):
+                            for b_i in range(len(edges)-1):
+                                if edges[b_i] <= val <= edges[b_i+1]: return b_i
+                            return 0 if val < edges[0] else len(edges)-2
+                        ax.axvline(find_bin(sigma_l), color='#00c853', linestyle='--', linewidth=1, zorder=4)
+                        ax.axvline(find_bin(sigma_u), color='#00c853', linestyle='--', linewidth=1, zorder=4)
+                    else:
+                        ax.axvline(sigma_l, color='#00c853', linestyle='--', linewidth=1, zorder=4)
+                        ax.axvline(sigma_u, color='#00c853', linestyle='--', linewidth=1, zorder=4)
+                
+                ax.set_title(f"{p_num}.{p_name}", fontsize=12, fontweight='bold', color='black', pad=32)
+                cpk_val = s0_stats['cpk'] if s0_stats['cpk'] is not None else 0
+                stats_info = [
+                    ("Min=", f"{s0_stats['min_val']:.4f}"), 
+                    ("Max=", f"{s0_stats['max_val']:.4f}"),
+                    ("Mean=", f"{s0_stats['mean']:.4f}"), 
+                    ("Stdev=", f"{s0_stats['stdev']:.4f}"), 
+                    ("CPK=", f"{cpk_val:.4f}")
+                ]
+                draw_stats_line(ax, 1.03, stats_info)
+                ax.set_ylabel("Parts", fontsize=8)
+                ax.set_xlabel(unit, fontsize=12, fontweight='bold', color='black')
+                ax.tick_params(labelsize=7)
+                ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.22), ncol=4, fontsize=7, frameon=False)
+                fig.tight_layout()
+                img_data = io.BytesIO()
+                plt.savefig(img_data, format='png', dpi=100)
+                img_data.seek(0)
+                
+                group_idx = i // chars_row
+                within_group_idx = i % chars_row
+                r_idx = group_idx * 22 + 2
+                c_idx = within_group_idx * 7 + 2
+                info_r_idx = group_idx * 22 + 6 + within_group_idx
+                hist_sheet.write(info_r_idx, 0, p_num)
+                hist_sheet.write(info_r_idx, 1, p_name)
+                hist_sheet.insert_image(r_idx, c_idx, f'h_{i}.png', {'image_data': img_data, 'x_scale': 1.0, 'y_scale': 1.0})
+
+            plt.close(fig)
+            export_tasks[task_id]["progress"] = 80
+
+            # ─── Sheet 3: Bin Info & Map ───
+            bin_sheet = workbook.add_worksheet('BinInfo')
+            
+            # 表头信息格式 (Lot Info)
+            info_label_fmt = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#F2F2F2', 'align': 'left'})
+            info_val_fmt = workbook.add_format({'border': 1, 'align': 'left'})
+
+            info_row = 0
+            bin_sheet.write_row(info_row, 0, ['Lot Information', ''], workbook.add_format({'bold': True, 'font_size': 12}))
+            info_row += 1
+            for key, label in info_labels.items():
+                val = lot_info.get(key)
+                if key == 'yield_rate' and val is not None: val = f"{val*100:.2f}%"
+                bin_sheet.write(info_row, 0, label, info_label_fmt)
+                bin_sheet.write(info_row, 1, str(val) if val is not None else "", info_val_fmt)
+                info_row += 1
+            
+            pass_bins = _get_pass_bins(lot_id, db)
+            row = info_row + 1
+            sites = bin_data['sites']
+            headers = ['Bin', 'Name'] + [f'Site{s}' for s in sites] + ['All Site', '% of total', 'Comment']
+            
+            # 辅助计算汇总行
+            def get_site_pass(s): return sum(b['sites'].get(f'site{s}', {}).get('count', 0) for b in bin_data['bins'] if b['bin_number'] in pass_bins)
+            def get_site_fail(s): return sum(b['sites'].get(f'site{s}', {}).get('count', 0) for b in bin_data['bins'] if b['bin_number'] not in pass_bins)
+            def get_site_total(s): return sum(b['sites'].get(f'site{s}', {}).get('count', 0) for b in bin_data['bins'])
+            total_pass = sum(b['all_site_count'] for b in bin_data['bins'] if b['bin_number'] in pass_bins)
+            total_fail = sum(b['all_site_count'] for b in bin_data['bins'] if b['bin_number'] not in pass_bins)
+            total_all = sum(b['all_site_count'] for b in bin_data['bins'])
+
+            # 准备 Bin 表格数据
+            bin_table_rows = []
+            for b in bin_data['bins']:
+                is_pass = b['bin_number'] in pass_bins
+                r_data = [b['bin_number'], b['bin_name']]
+                for s in sites: r_data.append(b['sites'].get(f'site{s}', {}).get('count', 0))
+                r_data.extend([b['all_site_count'], (b.get('all_site_pct') or 0.0) / 100.0, b.get('comment', '')])
+                bin_table_rows.append({'data': r_data, 'is_pass': is_pass, 'is_summary': False})
+
+            
+            bin_table_rows.append({'data': ['Passes', ''] + [get_site_pass(s) for s in sites] + [total_pass, total_pass/total_all if total_all > 0 else 0.0, ''], 'is_pass': True, 'is_summary': True})
+            bin_table_rows.append({'data': ['Fails', ''] + [get_site_fail(s) for s in sites] + [total_fail, total_fail/total_all if total_all > 0 else 0.0, ''], 'is_pass': False, 'is_summary': True})
+            bin_table_rows.append({'data': ['Sum', ''] + [get_site_total(s) for s in sites] + [total_all, 1.0, ''], 'is_pass': False, 'is_summary': True})
+
+
+            # 写入 Bin 表格并应用格式
+            start_bin_row = row
+            num_bin_rows = len(bin_table_rows)
+            num_bin_cols = len(headers)
+            
+            for r_idx in range(num_bin_rows + 1):
+                for c_idx in range(num_bin_cols):
+                    is_header = (r_idx == 0)
+                    fmt_props = {'border': 1, 'valign': 'vcenter'}
+                    
+                    # 粗外侧框线
+                    if r_idx == 0: fmt_props['top'] = 2
+                    if r_idx == num_bin_rows: fmt_props['bottom'] = 2
+                    if c_idx == 0: fmt_props['left'] = 2
+                    if c_idx == num_bin_cols - 1: fmt_props['right'] = 2
+                    
+                    if is_header:
+                        fmt_props.update({'bold': True, 'align': 'center', 'bg_color': '#D9D9D9'})
+                        val = headers[c_idx]
+                    else:
+                        row_info = bin_table_rows[r_idx - 1]
+                        val = row_info['data'][c_idx]
+                        if row_info['is_summary']:
+                            fmt_props.update({'bold': True, 'bg_color': '#FAFAFA', 'align': 'center'})
+                        else:
+                            if row_info['is_pass']: fmt_props['bg_color'] = '#E6FFE6'
+                            fmt_props['align'] = 'left' if c_idx == 1 else 'center'
+                        
+                        # 无论是数据行还是汇总行，百分比列都应用格式
+                        if headers[c_idx] == '% of total' and isinstance(val, (int, float)):
+                            fmt_props['num_format'] = '0.00%'
+
+                    
+                    cell_fmt = workbook.add_format(fmt_props)
+                    bin_sheet.write(start_bin_row + r_idx, c_idx, val, cell_fmt)
+
+            
+            row = start_bin_row + num_bin_rows + 1
+            bin_sheet.set_column(0, len(headers)-1, 12)
+            bin_sheet.set_column(1, 1, 25) # Name 列宽些，靠左
+            bin_sheet.set_column(len(headers)-1, len(headers)-1, 20) # Comment 列
+
+            
+            export_tasks[task_id]["progress"] = 85
+
+            row += 2
+            if map_result['has_map'] and map_result['data']:
+                import math
+                import matplotlib.patches as patches
+                from matplotlib.collections import PatchCollection
+                from matplotlib.lines import Line2D
+                df_map = pd.DataFrame(map_result['data'])
+                effective_pass_bins = set(pass_bins) | {1, 2}
+                primary_pass_bin = 1
+                df_map['bin'] = df_map['bin'].apply(lambda b: primary_pass_bin if int(b) in effective_pass_bins else int(b))
+                bin_counts = df_map['bin'].value_counts()
+                FAIL_COLORS = ['#ff6b6b', '#4dabf7', '#ffd43b', '#e599f7', '#74c0fc', '#ffa94d', '#da77f2', '#ff8787', '#339af0', '#fcc419', '#cc5de8', '#22b8cf', '#ff922b', '#845ef7', '#f06595', '#66d9e8']
+                BIN_COLORS = {}
+                for b_num in df_map['bin'].values:
+                    b_num = int(b_num)
+                    if b_num not in BIN_COLORS:
+                        if b_num in effective_pass_bins: BIN_COLORS[b_num] = '#69db7c'
+                        else:
+                            fail_count = sum(1 for v in BIN_COLORS.values() if v != '#69db7c')
+                            BIN_COLORS[b_num] = FAIL_COLORS[fail_count % len(FAIL_COLORS)]
+                n_bins = len(BIN_COLORS)
+                # 放大 Map 图表尺寸
+                fig, ax = plt.subplots(figsize=(10 + max(0, n_bins*0.05), 8 + max(0, n_bins*0.1)))
+                xs, ys, bins = df_map['x'].values, df_map['y'].values, df_map['bin'].values
+                rects = [patches.Rectangle((x - 0.5, y - 0.5), 1, 1) for x, y in zip(xs, ys)]
+                colors = [BIN_COLORS.get(int(b), '#000000') for b in bins]
+                pc = PatchCollection(rects, facecolors=colors, edgecolors='white', linewidths=0.5)
+                ax.add_collection(pc)
+                if 'retest' in df_map.columns:
+                    retest_df = df_map[df_map['retest'] == True]
+                    crosses = []
+                    for _, r in retest_df.iterrows():
+                        x, y = r['x'], r['y']; arm, thick = 0.3, 0.15
+                        crosses.append(patches.Rectangle((x - thick/2, y - arm), thick, arm*2))
+                        crosses.append(patches.Rectangle((x - arm, y - thick/2), arm*2, thick))
+                    if crosses:
+                        pc_cross = PatchCollection(crosses, facecolors=(0, 0, 0, 0.2), edgecolors='none')
+                        ax.add_collection(pc_cross)
+                min_x, max_x = int(df_map['x'].min()), int(df_map['x'].max())
+                min_y, max_y = int(df_map['y'].min()), int(df_map['y'].max())
+                ax.set_xlim(min_x - 1, max_x + 1)
+                ax.set_ylim(max_y + 1, min_y - 1)
+                ax.set_aspect('equal')
+                ax.set_title('Wafer Bin Map', fontsize=14, pad=20, fontweight='bold')
+                gridW, gridH = max_x - min_x + 1, max_y - min_y + 1
+                x_step, y_step = max(1, int(math.ceil(gridW / 10.0))), max(1, int(math.ceil(gridH / 10.0)))
+                ax.set_xticks(range(min_x, max_x + 1, x_step)); ax.set_yticks(range(min_y, max_y + 1, y_step))
+                ax.xaxis.tick_top(); ax.yaxis.tick_left(); ax.tick_params(axis='both', which='both', length=0, labelsize=9, colors='#aaaaaa')
+                for spine in ax.spines.values(): spine.set_visible(False)
+                sorted_bins = sorted(BIN_COLORS.keys(), key=lambda x: (-bin_counts.get(x, 0), x))
+                legend_elements = [Line2D([0], [0], marker='o', color='w', label=f'Bin{b} ({bin_counts.get(b, 0)})', markerfacecolor=BIN_COLORS[b], markersize=8, markeredgecolor='none') for b in sorted_bins]
+                ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1.02, 0.5), frameon=False, labelcolor='#333333')
+                
+                img_data = io.BytesIO()
+                plt.savefig(img_data, format='png', dpi=100, bbox_inches='tight')
+                plt.close(fig)
+                img_data.seek(0)
+                bin_sheet.insert_image(row, 0, 'wafer_map.png', {'image_data': img_data, 'x_scale': 1.1, 'y_scale': 1.1})
+
+            export_tasks[task_id]["progress"] = 95
+
+        output.seek(0)
+        export_tasks[task_id].update({
+            "status": "completed",
+            "progress": 100,
+            "result": output
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        export_tasks[task_id].update({
+            "status": "failed",
+            "error": str(e)
+        })
+
+@router.get("/lot/{lot_id}/export_items_old")
 def export_test_items(
     lot_id: int,
     filter_type: str = Query("all"),
@@ -124,6 +684,11 @@ def export_test_items(
         
         # ─── Sheet 1: Stats & Info ───
         stats_sheet = workbook.add_worksheet('Stats')
+        
+        # 定义格式
+        info_label_fmt = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#F2F2F2', 'align': 'left'})
+        info_val_fmt = workbook.add_format({'border': 1, 'align': 'left'})
+        
         info_labels = {
             "filename": "名称", "program": "程序", "test_machine": "测试机",
             "station_count": "工位数", "die_count": "测试数量",
@@ -140,11 +705,11 @@ def export_test_items(
                     if isinstance(val, str):
                         val = datetime.fromisoformat(val).strftime('%Y-%m-%d %H:%M:%S')
                 except: pass
-            stats_sheet.write(row, 0, label)
-            stats_sheet.write(row, 1, str(val))
+            stats_sheet.write(row, 0, label, info_label_fmt)
+            stats_sheet.write(row, 1, str(val) if val is not None else "", info_val_fmt)
             row += 1
         
-        row += 1 # 空一行
+        row += 2 # 空两行
         df_stats = pd.DataFrame(items_summary)
         if not df_stats.empty:
             column_mapping = {
@@ -158,21 +723,84 @@ def export_test_items(
             df_stats = df_stats[existing_cols].rename(columns=column_mapping)
             # 格式化百分比
             if 'Fail Rate' in df_stats.columns:
-                df_stats['Fail Rate'] = df_stats['Fail Rate'].apply(lambda x: f"{x*100:.3f}%" if pd.notna(x) else "0%")
+                df_stats['Fail Rate'] = df_stats['Fail Rate'].apply(lambda x: float(x) if pd.notna(x) else 0.0)
             if 'Yield' in df_stats.columns:
-                df_stats['Yield'] = df_stats['Yield'].apply(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "-")
+                df_stats['Yield'] = df_stats['Yield'].apply(lambda x: float(x) if pd.notna(x) else None)
+
             
-            df_stats.to_excel(writer, sheet_name='Stats', startrow=row, index=False)
+            # 写入参数统计表并应用格式
+            start_stats_row = row
+            num_rows = len(df_stats)
+            num_cols = len(df_stats.columns)
+            
+            for r_idx in range(num_rows + 1): # +1 为表头
+                for c_idx in range(num_cols):
+                    is_header = (r_idx == 0)
+                    col_name = df_stats.columns[c_idx]
+                    is_test_item = (col_name == 'TestItem')
+                    
+                    fmt_props = {'border': 1, 'valign': 'vcenter'}
+                    
+                    # 粗外侧框线
+                    if r_idx == 0: fmt_props['top'] = 2
+                    if r_idx == num_rows: fmt_props['bottom'] = 2
+                    if c_idx == 0: fmt_props['left'] = 2
+                    if c_idx == num_cols - 1: fmt_props['right'] = 2
+                    
+                    if is_header:
+                        fmt_props.update({'bold': True, 'align': 'center', 'bg_color': '#D9D9D9'})
+                        val = col_name
+                    else:
+                        fmt_props['align'] = 'left' if is_test_item else 'center'
+                        val = df_stats.iloc[r_idx - 1, c_idx]
+                        if pd.isna(val): val = ""
+                        if col_name in ['Fail Rate', 'Yield'] and isinstance(val, (int, float)):
+                            fmt_props['num_format'] = '0.00%'
+                        
+                        # CPK/CPU/CPL 染色逻辑
+                        if col_name in ['CPU', 'CPL', 'CPK'] and isinstance(val, (int, float)):
+                            if val < 1.0:
+                                fmt_props.update({'font_color': 'red', 'bold': True})
+                            elif val < 1.33:
+                                fmt_props.update({'font_color': '#FF8C00'}) # Orange
+
+                    
+                    cell_fmt = workbook.add_format(fmt_props)
+                    stats_sheet.write(start_stats_row + r_idx, c_idx, val, cell_fmt)
+
+            
+            # 设置列宽
+            stats_sheet.set_column(0, 0, 8)   # #
+            stats_sheet.set_column(1, 1, 40)  # TestItem 40宽
+            if num_cols > 2:
+                stats_sheet.set_column(2, num_cols - 1, 12) # 其余居中
+
 
         # ─── Sheet 2: Histograms ───
         hist_sheet = workbook.add_worksheet('Histograms')
-        hist_sheet.set_column(0, 50, 10) # 设置默认列宽
+        hist_sheet.set_column(0, 0, 10) # A列: 参数编号
+        hist_sheet.set_column(1, 1, 30) # B列: 参数名
+        hist_sheet.set_column(2, 50, 10) # 其余列宽
+        
+        # 写入顶部汇总信息
+        header_format = workbook.add_format({'bold': True, 'font_color': 'blue'})
+        hist_sheet.write(0, 2, "Data:", header_format) # C1
+        hist_sheet.write(0, 3, lot.filename, header_format) # D1
+        hist_sheet.write(1, 2, "Wafer:", header_format) # C2
+        hist_sheet.write(1, 3, lot.wafer_id, header_format) # D2
         
         from app.services.stats import apply_filter, calc_param_stats, calc_hist_edges, calc_hist_x_range
         
+        def draw_stats_line(ax_obj, y_pos, items_list):
+            # 拼接统计信息为单行，用3个空格分隔
+            line_text = "   ".join([f"{k}{v}" for k, v in items_list])
+            ax_obj.text(0.5, y_pos, line_text, transform=ax_obj.transAxes, 
+                        color='#00008B', fontweight='bold', fontsize=8, ha='center')
+
         # 复用 figure 以提升速度
-        fig, ax = plt.subplots(figsize=(6, 4)) # (6, 4) 表示宽 6 英寸，高 4 英寸
+        fig, ax = plt.subplots(figsize=(5.47, 4.5)) 
         SITE_COLORS = ['#ff6b6b', '#4dabf7', '#69db7c', '#ffd43b', '#e599f7', '#74c0fc', '#a9e34b', '#ffa94d']
+        chars_row = 2 # 每行显示的图表数
         
         for i, item in enumerate(items_summary):
             p_name = item['item_name']
@@ -208,7 +836,7 @@ def export_test_items(
             if not sites_data:
                 counts, _ = np.histogram(filtered_all, bins=edges)
                 sites_data.append({'site': 0, 'counts': counts})
-
+ 
             ax.clear()
             ax.set_axisbelow(True)
             ax.yaxis.grid(True, linestyle='--', alpha=0.5, zorder=0)
@@ -222,10 +850,47 @@ def export_test_items(
             x_min, x_max = x_range_info['x_min'], x_range_info['x_max']
             
             if exceeds_limit:
-                x_pos = np.arange(len(edges) - 1)
+                # 计算一个可见的最小高度 (例如最大计数的 2%)
+                max_count = np.max([np.max(s['counts']) for s in sites_data]) if sites_data else 1
+                min_h = max_count * 0.02
+                # 异常点锁定高度 (例如最大计数的 5%，对应前端的 5-10px)
+                outlier_h = max_count * 0.05
+
                 for idx, s in enumerate(sites_data):
                     color = SITE_COLORS[idx % len(SITE_COLORS)]
-                    ax.bar(x_pos, s['counts'], width=0.9, alpha=0.7, color=color, label=f"Site{s['site']}", zorder=3)
+                    
+                    # 计算 sigma 区间
+                    sigma_l = s0_stats['mean'] - 6 * s0_stats['stdev'] if s0_stats.get('mean') is not None and s0_stats.get('stdev') is not None else None
+                    sigma_u = s0_stats['mean'] + 6 * s0_stats['stdev'] if s0_stats.get('mean') is not None and s0_stats.get('stdev') is not None else None
+                    
+                    final_normal = []
+                    final_outlier = []
+                    
+                    for i_bin, cnt in enumerate(s['counts']):
+                        center = (edges[i_bin] + edges[i_bin+1]) / 2
+                        is_outlier_type = sigma_l is not None and (center < sigma_l or center > sigma_u) and 0 < cnt < 5
+                        
+                        if is_outlier_type:
+                            final_normal.append(0)
+                            final_outlier.append(max(cnt, outlier_h))
+                        elif cnt > 0:
+                            # 数量在 1-5 之间时使用最小高度 min_h
+                            val = max(cnt, min_h) if cnt < 5 else cnt
+                            final_normal.append(val)
+                            final_outlier.append(0)
+                        else:
+                            final_normal.append(0)
+                            final_outlier.append(0)
+                    
+                    # 绘制正常柱子 (强制最小宽度为 X轴范围的 1.5%，避免变成一根线)
+                    bar_w = 0.9
+                    ax.bar(x_pos, final_normal, width=bar_w, alpha=0.7, color=color, label=f"Site{s['site']}", zorder=3)
+                    # 绘制异常柱子 (如果存在)
+                    if any(v > 0 for v in final_outlier):
+                        ax.bar(x_pos, final_outlier, width=bar_w, alpha=0.8, color=color, zorder=4)
+
+
+
                 
                 if ll_bin_idx is not None:
                     ax.axvline(ll_bin_idx, color='red', linestyle='--', linewidth=1.5, zorder=4)
@@ -241,9 +906,45 @@ def export_test_items(
             else:
                 bin_centers = (edges[:-1] + edges[1:]) / 2
                 bin_w = edges[1] - edges[0] if len(edges) > 1 else 1
+                # 计算一个可见的最小高度
+                max_count = np.max([np.max(s['counts']) for s in sites_data]) if sites_data else 1
+                min_h = max_count * 0.02
+                outlier_h = max_count * 0.05
+
                 for idx, s in enumerate(sites_data):
                     color = SITE_COLORS[idx % len(SITE_COLORS)]
-                    ax.bar(bin_centers, s['counts'], width=bin_w * 0.8, alpha=0.7, color=color, label=f"Site{s['site']}", zorder=3)
+                    
+                    # 计算 sigma 区间
+                    sigma_l = s0_stats['mean'] - 6 * s0_stats['stdev'] if s0_stats.get('mean') is not None and s0_stats.get('stdev') is not None else None
+                    sigma_u = s0_stats['mean'] + 6 * s0_stats['stdev'] if s0_stats.get('mean') is not None and s0_stats.get('stdev') is not None else None
+                    
+                    final_normal = []
+                    final_outlier = []
+                    
+                    for i_bin, cnt in enumerate(s['counts']):
+                        center = (edges[i_bin] + edges[i_bin+1]) / 2
+                        is_outlier_type = sigma_l is not None and (center < sigma_l or center > sigma_u) and 0 < cnt < 5
+                        
+                        if is_outlier_type:
+                            final_normal.append(0)
+                            final_outlier.append(max(cnt, outlier_h))
+                        elif cnt > 0:
+                            val = max(cnt, min_h) if cnt < 5 else cnt
+                            final_normal.append(val)
+                            final_outlier.append(0)
+                        else:
+                            final_normal.append(0)
+                            final_outlier.append(0)
+
+                    # 强制最小宽度为 X轴范围的 1.5%，避免变成一根线
+                    bar_w = max(bin_w * 0.9, (x_max - x_min) * 0.015)
+                    
+                    ax.bar(bin_centers, final_normal, width=bar_w, alpha=0.7, color=color, label=f"Site{s['site']}", zorder=3)
+                    if any(v > 0 for v in final_outlier):
+                        ax.bar(bin_centers, final_outlier, width=bar_w, alpha=0.8, color=color, zorder=4)
+
+
+
                 
                 ax.set_xlim(x_min, x_max)
                 if ll is not None:
@@ -272,13 +973,23 @@ def export_test_items(
                     ax.axvline(sigma_l, color='#00c853', linestyle='--', linewidth=1, zorder=4)
                     ax.axvline(sigma_u, color='#00c853', linestyle='--', linewidth=1, zorder=4)
             
-            title_stats = (
-                f"Min={s0_stats['min_val']:.4f} Max={s0_stats['max_val']:.4f} "
-                f"Mean={s0_stats['mean']:.4f} Stdev={s0_stats['stdev']:.4f} CPK={s0_stats['cpk'] if s0_stats['cpk'] is not None else 0:.4f}"
-            )
-            ax.set_title(f"{p_num}.{p_name}\n{title_stats}", fontsize=8)
+            # 1. 标题：参数名 (黑色加粗, 字体大1号)
+            ax.set_title(f"{p_num}.{p_name}", fontsize=12, fontweight='bold', color='black', pad=32)
+
+            # 2. 参数信息：所有统计信息合并为一行 (全部使用深蓝色加粗显示)
+            cpk_val = s0_stats['cpk'] if s0_stats['cpk'] is not None else 0
+            stats_info = [
+                ("Min=", f"{s0_stats['min_val']:.4f}"), 
+                ("Max=", f"{s0_stats['max_val']:.4f}"),
+                ("Mean=", f"{s0_stats['mean']:.4f}"), 
+                ("Stdev=", f"{s0_stats['stdev']:.4f}"), 
+                ("CPK=", f"{cpk_val:.4f}")
+            ]
+            draw_stats_line(ax, 1.03, stats_info)
+ 
             ax.set_ylabel("Parts", fontsize=8)
-            ax.set_xlabel(unit, fontsize=8)
+            # 3. X轴单位：黑色加粗, 字体大1号
+            ax.set_xlabel(unit, fontsize=12, fontweight='bold', color='black')
             ax.tick_params(labelsize=7)
             
             # 添加图例在下方
@@ -289,61 +1000,216 @@ def export_test_items(
             plt.savefig(img_data, format='png', dpi=100)
             img_data.seek(0)
             
-            # 计算位置 (600x400 图片对应约 9.4列宽, 20行高。设间距为 10列 和 20行 使其紧凑挨在一起)
-            r_idx = (i // chars_row) * 18
-            c_idx = (i % chars_row) * 7
+            # 计算位置
+            group_idx = i // chars_row
+            within_group_idx = i % chars_row
+            r_idx = group_idx * 22 + 2
+            c_idx = within_group_idx * 7 + 2
+            
+            # 写入参数信息在左侧 (第一列 and 第二列)，随图表分组换行
+            info_r_idx = group_idx * 22 + 6 + within_group_idx
+            hist_sheet.write(info_r_idx, 0, p_num)
+            hist_sheet.write(info_r_idx, 1, p_name)
+            
             hist_sheet.insert_image(r_idx, c_idx, 
             f'h_{i}.png', {
                 'image_data': img_data,
-                'x_scale': 0.9,
-                'y_scale': 0.9
+                'x_scale': 1.0,
+                'y_scale': 1.0
             })
         plt.close(fig) # 循环结束后关闭
 
         # ─── Sheet 3: Bin Info & Map ───
         bin_sheet = workbook.add_worksheet('BinInfo')
-        # 表头
-        for r, (key, label) in enumerate(info_labels.items()):
+        
+        # 定义样式 (Lot Info)
+        info_label_fmt = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#F2F2F2', 'align': 'left'})
+        info_val_fmt = workbook.add_format({'border': 1, 'align': 'left'})
+
+        # 表头信息 (Lot Info)
+        info_row = 0
+        bin_sheet.write_row(info_row, 0, ['Lot Information', ''], workbook.add_format({'bold': True, 'font_size': 12}))
+        info_row += 1
+        for key, label in info_labels.items():
             val = lot_info.get(key)
             if key == 'yield_rate' and val is not None:
                 val = f"{val*100:.2f}%"
-            bin_sheet.write(r, 0, label)
-            bin_sheet.write(r, 1, str(val))
+            bin_sheet.write(info_row, 0, label, info_label_fmt)
+            bin_sheet.write(info_row, 1, str(val) if val is not None else "", info_val_fmt)
+            info_row += 1
+        
+        # 获取 Pass Bins
+        pass_bins = _get_pass_bins(lot_id, db)
         
         # Bin 表格
-        row = len(info_labels) + 1
+        row = info_row + 1
         sites = bin_data['sites']
-        headers = ['Bin', 'Name', 'Total Count', 'Total %'] + [f'Site{s}' for s in sites]
-        for c, h in enumerate(headers):
-            bin_sheet.write(row, c, h)
+        headers = ['Bin', 'Name'] + [f'Site{s}' for s in sites] + ['All Site', '% of total', 'Comment']
         
-        row += 1
+        # 辅助计算函数
+        def get_site_pass(s): return sum(b['sites'].get(f'site{s}', {}).get('count', 0) for b in bin_data['bins'] if b['bin_number'] in pass_bins)
+        def get_site_fail(s): return sum(b['sites'].get(f'site{s}', {}).get('count', 0) for b in bin_data['bins'] if b['bin_number'] not in pass_bins)
+        def get_site_total(s): return sum(b['sites'].get(f'site{s}', {}).get('count', 0) for b in bin_data['bins'])
+        
+        total_pass = sum(b['all_site_count'] for b in bin_data['bins'] if b['bin_number'] in pass_bins)
+        total_fail = sum(b['all_site_count'] for b in bin_data['bins'] if b['bin_number'] not in pass_bins)
+        total_all = sum(b['all_site_count'] for b in bin_data['bins'])
+
+        # 准备数据
+        bin_table_rows = []
         for b in bin_data['bins']:
-            bin_sheet.write(row, 0, b['bin_number'])
-            bin_sheet.write(row, 1, b['bin_name'])
-            bin_sheet.write(row, 2, b['all_site_count'])
-            bin_sheet.write(row, 3, f"{b['all_site_pct']:.2f}%")
-            for i, s in enumerate(sites):
-                cnt = b['sites'].get(f'site{s}', {}).get('count', 0)
-                bin_sheet.write(row, 4 + i, cnt)
-            row += 1
+            is_pass = b['bin_number'] in pass_bins
+            r_data = [b['bin_number'], b['bin_name']]
+            for s in sites: r_data.append(b['sites'].get(f'site{s}', {}).get('count', 0))
+            r_data.extend([b['all_site_count'], (b.get('all_site_pct') or 0.0) / 100.0, b.get('comment', '')])
+            bin_table_rows.append({'data': r_data, 'is_pass': is_pass, 'is_summary': False})
+
+        
+        bin_table_rows.append({'data': ['Passes', ''] + [get_site_pass(s) for s in sites] + [total_pass, total_pass/total_all if total_all > 0 else 0.0, ''], 'is_pass': True, 'is_summary': True})
+        bin_table_rows.append({'data': ['Fails', ''] + [get_site_fail(s) for s in sites] + [total_fail, total_fail/total_all if total_all > 0 else 0.0, ''], 'is_pass': False, 'is_summary': True})
+        bin_table_rows.append({'data': ['Sum', ''] + [get_site_total(s) for s in sites] + [total_all, 1.0, ''], 'is_pass': False, 'is_summary': True})
+
+
+        # 写入 Bin 表格
+        start_bin_row = row
+        num_bin_rows = len(bin_table_rows)
+        num_bin_cols = len(headers)
+        
+        for r_idx in range(num_bin_rows + 1):
+            for c_idx in range(num_bin_cols):
+                is_header = (r_idx == 0)
+                fmt_props = {'border': 1, 'valign': 'vcenter'}
+                
+                if r_idx == 0: fmt_props['top'] = 2
+                if r_idx == num_bin_rows: fmt_props['bottom'] = 2
+                if c_idx == 0: fmt_props['left'] = 2
+                if c_idx == num_bin_cols - 1: fmt_props['right'] = 2
+                
+                if is_header:
+                    fmt_props.update({'bold': True, 'align': 'center', 'bg_color': '#D9D9D9'})
+                    val = headers[c_idx]
+                else:
+                    row_info = bin_table_rows[r_idx - 1]
+                    val = row_info['data'][c_idx]
+                    if row_info['is_summary']:
+                        fmt_props.update({'bold': True, 'bg_color': '#FAFAFA', 'align': 'center'})
+                    else:
+                        if row_info['is_pass']: fmt_props['bg_color'] = '#E6FFE6'
+                        fmt_props['align'] = 'left' if c_idx == 1 else 'center'
+                    
+                    if headers[c_idx] == '% of total' and isinstance(val, (int, float)):
+                        fmt_props['num_format'] = '0.00%'
+
+                
+                cell_fmt = workbook.add_format(fmt_props)
+                bin_sheet.write(start_bin_row + r_idx, c_idx, val, cell_fmt)
+
+        
+        row = start_bin_row + num_bin_rows + 1
+        bin_sheet.set_column(0, len(headers)-1, 12)
+        bin_sheet.set_column(1, 1, 25) # Name 列宽些，靠左
+        bin_sheet.set_column(len(headers)-1, len(headers)-1, 20) # Comment 列
+
         
         # Wafer Map
         row += 2
         if map_result['has_map'] and map_result['data']:
+            import math
+            import matplotlib.patches as patches
+            from matplotlib.collections import PatchCollection
+            from matplotlib.lines import Line2D
+            
             df_map = pd.DataFrame(map_result['data'])
-            fig, ax = plt.subplots(figsize=(6, 5))
-            scatter = ax.scatter(df_map['x'], df_map['y'], c=df_map['bin'], cmap='prism', s=15, marker='s')
+            
+            # 隐藏逻辑: Bin 1 和 Bin 2 都认为是良品。最终合在一起显示为 Bin 1
+            effective_pass_bins = set(pass_bins) | {1, 2}
+            primary_pass_bin = 1
+            df_map['bin'] = df_map['bin'].apply(lambda b: primary_pass_bin if int(b) in effective_pass_bins else int(b))
+                
+            bin_counts = df_map['bin'].value_counts()
+            
+            # 完全复刻前端颜色的生成逻辑：按数据顺序首次遇到则分配颜色
+            FAIL_COLORS = ['#ff6b6b', '#4dabf7', '#ffd43b', '#e599f7', '#74c0fc', '#ffa94d', '#da77f2', '#ff8787', '#339af0', '#fcc419', '#cc5de8', '#22b8cf', '#ff922b', '#845ef7', '#f06595', '#66d9e8']
+            BIN_COLORS = {}
+            for b_num in df_map['bin'].values:
+                b_num = int(b_num)
+                if b_num not in BIN_COLORS:
+                    if b_num in effective_pass_bins:
+                        BIN_COLORS[b_num] = '#69db7c'
+                    else:
+                        fail_count = sum(1 for v in BIN_COLORS.values() if v != '#69db7c')
+                        BIN_COLORS[b_num] = FAIL_COLORS[fail_count % len(FAIL_COLORS)]
+            
+            n_bins = len(BIN_COLORS)
+            # 放大 Map 图表尺寸
+            fig, ax = plt.subplots(figsize=(10 + max(0, n_bins*0.05), 8 + max(0, n_bins*0.1)))
+            
+            xs = df_map['x'].values
+            ys = df_map['y'].values
+            bins = df_map['bin'].values
+            
+            # 使用 PatchCollection 绘制方块阵列（白边线达到前端Grid效果）
+            rects = [patches.Rectangle((x - 0.5, y - 0.5), 1, 1) for x, y in zip(xs, ys)]
+            colors = [BIN_COLORS.get(int(b), '#000000') for b in bins]
+            
+            pc = PatchCollection(rects, facecolors=colors, edgecolors='white', linewidths=0.5)
+            ax.add_collection(pc)
+            
+            # 复刻前端的复测标记 (黑色半透明十字)
+            if 'retest' in df_map.columns:
+                retest_df = df_map[df_map['retest'] == True]
+                crosses = []
+                for _, r in retest_df.iterrows():
+                    x, y = r['x'], r['y']
+                    arm = 0.3
+                    thick = 0.15
+                    crosses.append(patches.Rectangle((x - thick/2, y - arm), thick, arm*2))
+                    crosses.append(patches.Rectangle((x - arm, y - thick/2), arm*2, thick))
+                if crosses:
+                    pc_cross = PatchCollection(crosses, facecolors=(0, 0, 0, 0.2), edgecolors='none')
+                    ax.add_collection(pc_cross)
+            
+            min_x, max_x = int(df_map['x'].min()), int(df_map['x'].max())
+            min_y, max_y = int(df_map['y'].min()), int(df_map['y'].max())
+            
+            ax.set_xlim(min_x - 1, max_x + 1)
+            ax.set_ylim(max_y + 1, min_y - 1)  # Invert Y
             ax.set_aspect('equal')
-            ax.invert_yaxis()
-            ax.set_title('Wafer Bin Map', fontsize=12)
-            plt.colorbar(scatter, ax=ax, label='Bin Number')
+            ax.set_title('Wafer Bin Map', fontsize=14, pad=20, fontweight='bold')
+            
+            # 刻度标记逻辑复刻前端
+            gridW = max_x - min_x + 1
+            gridH = max_y - min_y + 1
+            x_step = max(1, int(math.ceil(gridW / 10.0)))
+            y_step = max(1, int(math.ceil(gridH / 10.0)))
+            
+            ax.set_xticks(range(min_x, max_x + 1, x_step))
+            ax.set_yticks(range(min_y, max_y + 1, y_step))
+            
+            # 刻度放在上边和左侧
+            ax.xaxis.tick_top()
+            ax.yaxis.tick_left()
+            ax.tick_params(axis='both', which='both', length=0, labelsize=9, colors='#aaaaaa')
+            
+            # 隐藏外边框
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            
+            # 图例排序：按前端 Fail Bins 数量降序逻辑，但把 Pass Bins 放在最前或按原顺序
+            # 前端展示时，Legend顺序是 All, 然后 Fail Bins 降序。这里按 count 降序。
+            sorted_bins = sorted(BIN_COLORS.keys(), key=lambda x: (-bin_counts.get(x, 0), x))
+            legend_elements = [
+                Line2D([0], [0], marker='o', color='w', label=f'Bin{b} ({bin_counts.get(b, 0)})',
+                       markerfacecolor=BIN_COLORS[b], markersize=8, markeredgecolor='none')
+                for b in sorted_bins
+            ]
+            ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1.02, 0.5), frameon=False, labelcolor='#333333')
             
             img_data = io.BytesIO()
-            plt.savefig(img_data, format='png', dpi=90, bbox_inches='tight')
+            plt.savefig(img_data, format='png', dpi=100, bbox_inches='tight')
             plt.close(fig)
             img_data.seek(0)
-            bin_sheet.insert_image(row, 0, 'wafer_map.png', {'image_data': img_data})
+            bin_sheet.insert_image(row, 0, 'wafer_map.png', {'image_data': img_data, 'x_scale': 1.1, 'y_scale': 1.1})
 
     output.seek(0)
     filename = f"LOT_{lot_id}_FullReport_{filter_type}.xlsx"
@@ -770,6 +1636,8 @@ def get_param_data(
     data_range: str = Query("final"),
     custom_min: Optional[float] = Query(None),
     custom_max: Optional[float] = Query(None),
+    custom_ll: Optional[float] = Query(None),
+    custom_ul: Optional[float] = Query(None),
     db: Session = Depends(get_db),
 ):
     """
@@ -815,6 +1683,12 @@ def get_param_data(
     ul = item.upper_limit if item else None
     unit = item.unit if item else ''
 
+    if filter_type == 'custom':
+        if custom_ll is not None:
+            ll = custom_ll
+        if custom_ul is not None:
+            ul = custom_ul
+
     # 应用Filter
     from app.services.stats import apply_filter, calc_param_stats
 
@@ -822,6 +1696,12 @@ def get_param_data(
 
     # ── 先计算 All Sites (site=0) ─────────────────────────
     all_values = df[param_name].dropna().values.astype(float)
+    if filter_type == 'filter_by_sigma' and len(all_values) > 1:
+        mean_val = np.mean(all_values)
+        std_val = np.std(all_values, ddof=1)
+        ll = float(mean_val - sigma * std_val)
+        ul = float(mean_val + sigma * std_val)
+
     filtered_all = apply_filter(all_values, filter_type, ll, ul, sigma, custom_min, custom_max)
     all_stats = calc_param_stats(filtered_all, ll, ul, len(filtered_all))
 
@@ -979,12 +1859,14 @@ def get_multi_lot_param_hist(
     data_range: str = Query("final"),
     custom_min: Optional[float] = Query(None),
     custom_max: Optional[float] = Query(None),
+    custom_ll: Optional[float] = Query(None),
+    custom_ul: Optional[float] = Query(None),
     db: Session = Depends(get_db),
 ):
     """
     多LOT单参数直方图数据，各LOT共用同一套 global_edges
     """
-    from app.services.stats import apply_filter, calc_param_stats
+    from app.services.stats import apply_filter, calc_param_stats, calc_hist_edges
 
     ids = [int(x) for x in lot_ids.split(",") if x.strip()]
     lots = db.query(Lot).filter(Lot.id.in_(ids)).all()
@@ -1001,16 +1883,22 @@ def get_multi_lot_param_hist(
     ul = ref_item.upper_limit if ref_item else None
     unit = ref_item.unit if ref_item else ""
 
+    if filter_type == 'custom':
+        if custom_ll is not None:
+            ll = custom_ll
+        if custom_ul is not None:
+            ul = custom_ul
+
     # 先收集所有LOT的全部数据，计算全局 edges
-    all_values_combined = []
-    lot_values: dict = {}
+    all_raw_combined = []
+    lot_raw_values: dict = {}
     for lot in ordered_lots:
         if not lot.parquet_path or not os.path.exists(lot.parquet_path):
-            lot_values[lot.id] = np.array([])
+            lot_raw_values[lot.id] = np.array([])
             continue
         df = pd.read_parquet(lot.parquet_path)
         if param_name not in df.columns:
-            lot_values[lot.id] = np.array([])
+            lot_raw_values[lot.id] = np.array([])
             continue
         if 'X_COORD' in df.columns and 'Y_COORD' in df.columns:
             if data_range == 'final':
@@ -1018,21 +1906,37 @@ def get_multi_lot_param_hist(
             elif data_range == 'original':
                 df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
         vals = df[param_name].dropna().values.astype(float)
+        lot_raw_values[lot.id] = vals
+        all_raw_combined.extend(vals.tolist())
+
+    all_raw_arr = np.array(all_raw_combined)
+
+    if filter_type == 'filter_by_sigma' and len(all_raw_arr) > 1:
+        mean_val = np.mean(all_raw_arr)
+        std_val = np.std(all_raw_arr, ddof=1)
+        ll = float(mean_val - sigma * std_val)
+        ul = float(mean_val + sigma * std_val)
+
+    all_values_combined = []
+    lot_values: dict = {}
+    for lot in ordered_lots:
+        vals = lot_raw_values.get(lot.id, np.array([]))
         filtered = apply_filter(vals, filter_type, ll, ul, sigma, custom_min, custom_max)
         lot_values[lot.id] = filtered
         all_values_combined.extend(filtered.tolist())
 
     all_arr = np.array(all_values_combined)
-    NUM_BINS = 50
+
+    # 使用 calc_hist_edges 获得与 ParamView 一致的 exceeds_limit 逻辑
     if len(all_arr) > 1:
-        gmin, gmax = float(np.min(all_arr)), float(np.max(all_arr))
-        if gmin == gmax:
-            center = gmin
-            half = abs(center) * 0.5 if center != 0 else 0.5
-            gmin = center - half; gmax = center + half
-        _, global_edges = np.histogram(all_arr, bins=NUM_BINS, range=(gmin, gmax))
+        global_edges, exceeds_limit, ll_bin_index, ul_bin_index = calc_hist_edges(all_arr, ll, ul)
     else:
+        NUM_BINS = 50
         global_edges = np.linspace(0, 1, NUM_BINS + 1)
+        exceeds_limit = False
+        ll_bin_index = None
+        ul_bin_index = None
+
     global_edges_list = [round(float(e), 6) for e in global_edges.tolist()]
 
     result = []
@@ -1042,14 +1946,18 @@ def get_multi_lot_param_hist(
             counts, _ = np.histogram(vals, bins=global_edges)
             counts_list = counts.tolist()
         else:
-            counts_list = [0] * NUM_BINS
+            counts_list = [0] * (len(global_edges) - 1)
         stats = calc_param_stats(vals, ll, ul, len(vals)) if len(vals) > 0 else {}
         result.append({
             "lot_id": lot.id,
             "filename": lot.filename,
+            "wafer_id": lot.wafer_id or "",
+            "lot_id_str": lot.lot_id or "",
             "counts": counts_list,
             "stats": stats,
         })
+
+    overall_stats = calc_param_stats(all_arr, ll, ul, len(all_arr)) if len(all_arr) > 0 else {}
 
     return {
         "param_name": param_name,
@@ -1057,7 +1965,11 @@ def get_multi_lot_param_hist(
         "lower_limit": ll,
         "upper_limit": ul,
         "global_edges": global_edges_list,
+        "exceeds_limit": exceeds_limit,
+        "ll_bin_index": ll_bin_index,
+        "ul_bin_index": ul_bin_index,
         "lots": result,
+        "overall_stats": overall_stats,
     }
 
 
@@ -1112,7 +2024,7 @@ def get_multi_lot_bin_summary(
         rows.append(row)
 
     return {
-        "lots": [{"id": l.id, "filename": l.filename, "lot_id": l.lot_id} for l in ordered_lots],
+        "lots": [{"id": l.id, "filename": l.filename, "lot_id": l.lot_id, "wafer_id": l.wafer_id} for l in ordered_lots],
         "bins": rows,
     }
 
@@ -1154,6 +2066,7 @@ def get_multi_lot_wafer_bin_maps(
             "lot_id": lot.id,
             "filename": lot.filename,
             "lot_id_str": lot.lot_id,
+            "wafer_id": lot.wafer_id,
             "has_map": True,
             "data": tmp.to_dict('records'),
         })
