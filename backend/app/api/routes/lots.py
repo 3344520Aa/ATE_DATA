@@ -253,27 +253,32 @@ def get_lots(
     status: Optional[str] = None,
     data_type: Optional[str] = None,
 ):
-    query = db.query(Lot)
-    if product_name:
-        query = query.filter(Lot.product_name.ilike(f"%{product_name}%"))
-    if lot_id:
-        query = query.filter(Lot.lot_id.ilike(f"%{lot_id}%"))
-    if status:
-        query = query.filter(Lot.status == status)
-    if data_type:
-        query = query.filter(Lot.data_type == data_type)
+    try:
+        query = db.query(Lot)
+        if product_name:
+            query = query.filter(Lot.product_name.ilike(f"%{product_name}%"))
+        if lot_id:
+            query = query.filter(Lot.lot_id.ilike(f"%{lot_id}%"))
+        if status:
+            query = query.filter(Lot.status == status)
+        if data_type:
+            query = query.filter(Lot.data_type == data_type)
 
-    total = query.count()
-    items = query.order_by(desc(Lot.upload_date)).offset(
-        (page-1)*page_size
-    ).limit(page_size).all()
+        total = query.count()
+        items = query.order_by(desc(Lot.upload_date)).offset(
+            (page-1)*page_size
+        ).limit(page_size).all()
 
-    return {
-        "total": total,
-        "items": items,
-        "page": page,
-        "page_size": page_size
-    }
+        return {
+            "total": total,
+            "items": items,
+            "page": page,
+            "page_size": page_size
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("")

@@ -726,7 +726,13 @@ def parse_acco(filepath: str, tester: str) -> ParsedData:
 
     df = df.dropna(subset=['SITE_NUM']).reset_index(drop=True)
 
-    has_coords = x_col is not None and df['X_COORD'].notna().any()
+    # 判定是否有坐标：除了存在列且有非空值外，还需要至少有一个非 (0,0) 的坐标
+    # 这能有效区分「带 0,0 占位符的 FT 数据」和「真正的 CP 数据」
+    has_coords = (
+        x_col is not None and 
+        df['X_COORD'].notna().any() and 
+        ((df['X_COORD'] != 0) | (df['Y_COORD'] != 0)).any()
+    )
 
     # ── 8. 测试阶段识别 ───────────────────────────────────────────
     from app.services.parsers.detector import detect_test_stage

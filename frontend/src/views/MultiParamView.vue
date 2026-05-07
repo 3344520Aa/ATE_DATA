@@ -66,7 +66,16 @@
           <div class="option-item">
             <label>Mode</label>
             <label><input type="radio" :checked="currentTab?.options.histMode === 'lot'" @change="updateOption('histMode', 'lot')" /> LOT</label>
-            <label><input type="radio" :checked="currentTab?.options.histMode === 'single'" @change="updateOption('histMode', 'single')" /> Single</label>
+            <label>
+              <input type="radio" :checked="currentTab?.options.histMode === 'single'" @change="updateOption('histMode', 'single')" /> Single
+            </label>
+            <input 
+              v-if="currentTab?.options.histMode === 'single'"
+              v-model="currentTab.options.single_lot_name" 
+              class="single-name-input"
+              title="Enter display name for Single mode"
+              @change="updateOption('single_lot_name', currentTab.options.single_lot_name)"
+            />
           </div>
         </div>
       </div>
@@ -94,7 +103,7 @@
           </thead>
           <tbody v-if="currentTab?.options.histMode === 'single'">
             <tr>
-              <td><span class="lot-dot" style="background: #333;"></span> ALL</td>
+              <td><span class="lot-dot" style="background: #333;"></span> {{ currentTab.options.single_lot_name || 'ALL' }}</td>
               <td>{{ currentTab.data.overall_stats?.exec_qty ?? '-' }}</td>
               <td>{{ currentTab.data.overall_stats?.fail_count ?? '-' }}</td>
               <td>{{ currentTab.data.overall_stats?.yield_rate != null ? (currentTab.data.overall_stats.yield_rate * 100).toFixed(2) + '%' : '-' }}</td>
@@ -160,6 +169,7 @@ interface Tab {
   param_name: string
   options: any
   data: any
+  single_lot_name?: string
 }
 
 const tabs = ref<Tab[]>([])
@@ -174,6 +184,7 @@ const draftOptions = ref({
   custom_ll: null as number | null,
   custom_ul: null as number | null,
   histMode: 'lot',
+  single_lot_name: 'all_lots',
 })
 
 const sigmaInputValue = ref(draftOptions.value.sigma)
@@ -266,6 +277,9 @@ async function addTab() {
   }
 
   if (tabs.value.length >= 10) tabs.value.shift()
+  if (optionsToUse.single_lot_name === undefined) {
+    optionsToUse.single_lot_name = 'all_lots'
+  }
   tabs.value.push(newTab)
   activeTab.value = tabId
   await loadTabData(tabId)
@@ -554,7 +568,7 @@ function renderHist(tabId: string) {
       
       series.push({
         type: 'bar',
-        name: 'All LOTs',
+        name: tab.options.single_lot_name || 'All LOTs',
         data: normalData,
         itemStyle: { color: '#4dabf7', opacity: 0.8 },
         barGap: '-100%',
@@ -563,7 +577,7 @@ function renderHist(tabId: string) {
       if (outlierData.some((d: any) => d !== '-')) {
         series.push({
           type: 'bar',
-          name: 'All LOTs',
+          name: tab.options.single_lot_name || 'All LOTs',
           data: outlierData,
           itemStyle: { color: '#4dabf7', opacity: 0.8 },
           barGap: '-100%',
@@ -622,8 +636,15 @@ function renderHist(tabId: string) {
     if (numBins - ul_bin_index > 2) labelPositions.add(ul_bin_index + Math.floor((numBins - ul_bin_index) / 2))
 
     chart.setOption({
-      title: { text: `${tab.item_number}.${param_name}`, left: 'center', textStyle: { fontSize: 13 } },
-      grid: { bottom: 110 },
+      title: { 
+        text: `${tab.item_number}.${param_name}`, 
+        left: 'center', 
+        textStyle: { fontSize: 13 },
+        subtext: tab.options.histMode === 'single' && tab.data.overall_stats 
+          ? `Min=${fmtNum(tab.data.overall_stats.min_val)} Max=${fmtNum(tab.data.overall_stats.max_val)} Mean=${fmtNum(tab.data.overall_stats.mean)} Stdev=${fmtNum(tab.data.overall_stats.stdev)} CPK=${fmtNum(tab.data.overall_stats.cpk)}`
+          : ''
+      },
+      grid: { bottom: 110, top: tab.options.histMode === 'single' ? 80 : 60 },
       tooltip: {
         trigger: 'axis',
         formatter: (params: any) => {
@@ -638,7 +659,7 @@ function renderHist(tabId: string) {
           return tip
         },
       },
-      legend: { bottom: 5, data: tab.options.histMode === 'lot' ? lots.map((l:any)=>getLotDisplayName(l)) : ['All LOTs'] },
+      legend: { bottom: 5, data: tab.options.histMode === 'lot' ? lots.map((l:any)=>getLotDisplayName(l)) : [tab.options.single_lot_name || 'All LOTs'] },
       xAxis: {
         type: 'category',
         data: binLabels,
@@ -725,12 +746,12 @@ function renderHist(tabId: string) {
         }
       })
       series.push({
-        type: 'bar', name: 'All LOTs', data: normalData,
+        type: 'bar', name: tab.options.single_lot_name || 'All LOTs', data: normalData,
         itemStyle: { color: '#4dabf7', opacity: 0.8 }, barWidth: barWidthPct,
       })
       if (outlierData.length > 0) {
         series.push({
-          type: 'bar', name: 'All LOTs', data: outlierData,
+          type: 'bar', name: tab.options.single_lot_name || 'All LOTs', data: outlierData,
           itemStyle: { color: '#4dabf7', opacity: 0.8 }, barWidth: barWidthPct, barMinHeight: 5,
         })
       }
@@ -773,10 +794,17 @@ function renderHist(tabId: string) {
     }
 
     chart.setOption({
-      title: { text: `${tab.item_number}.${param_name}`, left: 'center', textStyle: { fontSize: 13 } },
-      grid: { bottom: 110 },
+      title: { 
+        text: `${tab.item_number}.${param_name}`, 
+        left: 'center', 
+        textStyle: { fontSize: 13 },
+        subtext: tab.options.histMode === 'single' && tab.data.overall_stats 
+          ? `Min=${fmtNum(tab.data.overall_stats.min_val)} Max=${fmtNum(tab.data.overall_stats.max_val)} Mean=${fmtNum(tab.data.overall_stats.mean)} Stdev=${fmtNum(tab.data.overall_stats.stdev)} CPK=${fmtNum(tab.data.overall_stats.cpk)}`
+          : ''
+      },
+      grid: { bottom: 110, top: tab.options.histMode === 'single' ? 80 : 60 },
       tooltip: { trigger: 'axis' },
-      legend: { bottom: 5, type: 'scroll', data: tab.options.histMode === 'lot' ? lots.map((l:any)=>getLotDisplayName(l)) : ['All LOTs'] },
+      legend: { bottom: 5, type: 'scroll', data: tab.options.histMode === 'lot' ? lots.map((l:any)=>getLotDisplayName(l)) : [tab.options.single_lot_name || 'All LOTs'] },
       xAxis: {
         type: 'value', name: unit, min: xMin, max: xMax, interval: (xMax - xMin) / 10,
         axisLine: { onZero: false, show: false }, axisTick: { show: true },
@@ -912,11 +940,22 @@ onMounted(async () => {
 
 .option-item { display: flex; align-items: center; gap: 6px; }
 .option-item label { color: #666; }
-.option-item select, .option-item input[type="number"] {
+.option-item select, .option-item input[type="number"], .single-name-input {
   padding: 3px 6px;
   border: 1px solid #d9d9d9;
   border-radius: 4px;
   font-size: 12px;
+}
+.single-name-input {
+  width: 80px;
+  margin-left: -4px;
+  border-color: #eee;
+  color: #1890ff;
+  font-weight: 500;
+}
+.single-name-input:hover, .single-name-input:focus {
+  border-color: #40a9ff;
+  outline: none;
 }
 .option-item button {
   padding: 3px 10px;

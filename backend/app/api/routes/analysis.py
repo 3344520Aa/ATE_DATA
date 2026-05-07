@@ -5,6 +5,7 @@ from sqlalchemy import and_
 from typing import Optional, List
 from fastapi.responses import StreamingResponse
 import io
+from urllib.parse import quote
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
@@ -12,10 +13,15 @@ from app.core.database import get_db
 from app.models.test_item import TestItem
 from app.models.bin_summary import BinSummary
 from app.models.lot import Lot
+from app.models.idle_check_config import IdleCheckConfig
+from app.schemas.idle_check import IdleCheckConfigCreate
 from fastapi import BackgroundTasks
 import uuid
 import time
-# 延后导入，防止环境缺少依赖导致后端无法启动
+import math
+from datetime import datetime, timedelta, timezone
+from app.core.config import settings
+UPLOAD_DIR = os.path.expanduser(settings.UPLOAD_DIR)
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -37,8 +43,8 @@ def get_test_items_summary(
 
     df = pd.read_parquet(lot.parquet_path)
     
-    # 坐标去重
-    if 'X_COORD' in df.columns and 'Y_COORD' in df.columns:
+    # 坐标去重：仅针对 CP 数据进行 de-duplication
+    if lot.data_type == 'CP' and 'X_COORD' in df.columns and 'Y_COORD' in df.columns:
         if data_range == 'final':
             df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
         elif data_range == 'original':
@@ -60,18 +66,26 @@ def get_test_items_summary(
         exec_qty = int(df[item.item_name].notna().sum())
         
         # 应用过滤
+        ll, ul = item.lower_limit, item.upper_limit
+        if filter_type == 'filter_by_sigma' and len(values[~np.isnan(values)]) > 1:
+            clean_vals = values[~np.isnan(values)]
+            m = np.mean(clean_vals)
+            s = np.std(clean_vals, ddof=1)
+            ll = float(m - sigma * s)
+            ul = float(m + sigma * s)
+
         filtered_values = apply_filter(values, filter_type, item.lower_limit, item.upper_limit, sigma)
         
         # 计算统计
-        stats = calc_param_stats(filtered_values, item.lower_limit, item.upper_limit, exec_qty)
+        stats = calc_param_stats(filtered_values, ll, ul, exec_qty)
         
         result.append({
             "id": item.id,
             "item_number": item.item_number,
             "item_name": item.item_name,
             "unit": item.unit,
-            "lower_limit": item.lower_limit,
-            "upper_limit": item.upper_limit,
+            "lower_limit": ll,
+            "upper_limit": ul,
             **stats
         })
 
@@ -184,7 +198,7 @@ def run_export_task(
 
         # 预读数据
         df_all = pd.read_parquet(lot.parquet_path)
-        if 'X_COORD' in df_all.columns and 'Y_COORD' in df_all.columns:
+        if lot_info.get('data_type') == 'CP' and 'X_COORD' in df_all.columns and 'Y_COORD' in df_all.columns:
             if data_range == 'final':
                 df_all = df_all.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
             elif data_range == 'original':
@@ -303,11 +317,14 @@ def run_export_task(
             
             from app.services.stats import apply_filter, calc_param_stats, calc_hist_edges, calc_hist_x_range
             
-            def draw_stats_line(ax_obj, y_pos, items_list):
-                # 拼接统计信息为单行，用3个空格分隔
-                line_text = "   ".join([f"{k}{v}" for k, v in items_list])
-                ax_obj.text(0.5, y_pos, line_text, transform=ax_obj.transAxes, 
-                            color='#000000', fontweight='bold', fontsize=8, ha='center')
+            def draw_stats_line(ax_obj, y_pos, items_groups):
+                # items_groups 为 list of list, 每一项绘制一行
+                for idx, group in enumerate(items_groups):
+                    line_text = "   ".join([f"{k}{v}" for k, v in group])
+                    # y 轴位置向下偏移
+                    current_y = y_pos - (idx * 0.05)
+                    ax_obj.text(0.5, current_y, line_text, transform=ax_obj.transAxes, 
+                                color='#000000', fontweight='bold', fontsize=8, ha='center')
 
             fig, ax = plt.subplots(figsize=(5.47, 4.5)) 
             SITE_COLORS = ['#ff6b6b', '#4dabf7', '#69db7c', '#ffd43b', '#e599f7', '#74c0fc', '#a9e34b', '#ffa94d']
@@ -444,7 +461,7 @@ def run_export_task(
                     ("Stdev=", f"{s0_stats['stdev']:.4f}"), 
                     ("CPK=", f"{cpk_val:.4f}")
                 ]
-                draw_stats_line(ax, 1.03, stats_info)
+                draw_stats_line(ax, 1.05, [stats_info])
                 ax.set_ylabel("Parts", fontsize=8)
                 ax.set_xlabel(unit, fontsize=12, fontweight='bold', color='black')
                 ax.tick_params(labelsize=7)
@@ -671,7 +688,7 @@ def export_test_items(
 
     # 预读数据，避免循环内重复读取 Parquet
     df_all = pd.read_parquet(lot.parquet_path)
-    if 'X_COORD' in df_all.columns and 'Y_COORD' in df_all.columns:
+    if lot_info.get('data_type') == 'CP' and 'X_COORD' in df_all.columns and 'Y_COORD' in df_all.columns:
         if data_range == 'final':
             df_all = df_all.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
         elif data_range == 'original':
@@ -1381,11 +1398,12 @@ def get_wafer_bin_map(
     counts = df['key'].value_counts()
     retest_keys = set(counts[counts > 1].index)
 
-    # 按data_range去重
-    if data_range == 'final':
-        df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
-    elif data_range == 'original':
-        df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
+    # 按data_range去重：仅针对 CP 数据
+    if lot.data_type == 'CP':
+        if data_range == 'final':
+            df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
+        elif data_range == 'original':
+            df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
 
     # 构造结果
     df['is_retest'] = df['key'].isin(retest_keys)
@@ -1659,8 +1677,8 @@ def get_param_data(
     if param_name not in df.columns:
         raise HTTPException(status_code=404, detail=f"参数 {param_name} 不存在")
 
-    # 坐标去重
-    if 'X_COORD' in df.columns and 'Y_COORD' in df.columns:
+    # 坐标去重：仅针对 CP 数据进行 de-duplication
+    if lot.data_type == 'CP' and 'X_COORD' in df.columns and 'Y_COORD' in df.columns:
         if data_range == 'final':
             df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
         elif data_range == 'original':
@@ -1789,65 +1807,532 @@ def get_param_data(
 @router.get("/multi/items")
 def get_multi_lot_items(
     lot_ids: str = Query(..., description="逗号分隔的lot id，如 1,2,3"),
+    filter_type: str = Query("all"),
+    sigma: float = Query(3.0),
+    data_range: str = Query("final"),
     db: Session = Depends(get_db),
 ):
     """
     多LOT参数汇总表：返回每个LOT的 site=0 参数统计
-    响应结构:
-    {
-      lots: [{id, filename, lot_id}],
-      params: [{item_number, item_name, unit, lower_limit, upper_limit,
-                lots: {lot_id: {mean,stdev,min_val,max_val,cpk,yield_rate,fail_count}}}]
-    }
     """
-    ids = [int(x) for x in lot_ids.split(",") if x.strip()]
-    lots = db.query(Lot).filter(Lot.id.in_(ids)).all()
-    lot_map = {l.id: l for l in lots}
-    # 保持用户传入顺序
-    ordered_lots = [lot_map[i] for i in ids if i in lot_map]
+    try:
+        ids = [int(x) for x in lot_ids.split(",") if x.strip()]
+        lots = db.query(Lot).filter(Lot.id.in_(ids)).all()
+        lot_map = {l.id: l for l in lots}
+        ordered_lots = [lot_map[i] for i in ids if i in lot_map]
 
-    # 以第一个LOT的参数顺序为基准
-    if not ordered_lots:
-        raise HTTPException(status_code=404, detail="LOT不存在")
+        if not ordered_lots:
+            return {"lots": [], "params": []}
 
-    ref_items = db.query(TestItem).filter(
-        TestItem.lot_id == ordered_lots[0].id,
-        TestItem.site == 0
-    ).order_by(TestItem.item_number).all()
+        # 一次性获取所有相关的 TestItem 记录
+        all_items = db.query(TestItem).filter(
+            TestItem.lot_id.in_(ids),
+            TestItem.site == 0
+        ).all()
 
-    params = []
-    for ref in ref_items:
-        row = {
-            "item_number": ref.item_number,
-            "item_name": ref.item_name,
-            "unit": ref.unit,
-            "lower_limit": ref.lower_limit,
-            "upper_limit": ref.upper_limit,
-            "lots": {}
-        }
-        for lot in ordered_lots:
-            item = db.query(TestItem).filter(
-                TestItem.lot_id == lot.id,
-                TestItem.item_name == ref.item_name,
-                TestItem.site == 0
-            ).first()
-            if item:
-                row["lots"][str(lot.id)] = {
-                    "mean": item.mean,
-                    "stdev": item.stdev,
-                    "min_val": item.min_val,
-                    "max_val": item.max_val,
-                    "cpk": item.cpk,
-                    "yield_rate": item.yield_rate,
-                    "fail_count": item.fail_count,
-                    "exec_qty": item.exec_qty,
+        from collections import defaultdict
+        from app.services.stats import apply_filter, calc_param_stats
+
+        # 如果需要过滤，则实时计算
+        realtime_stats = defaultdict(dict)
+        if filter_type != 'all':
+            for lot in ordered_lots:
+                if not lot.parquet_path or not os.path.exists(lot.parquet_path):
+                    continue
+                df = pd.read_parquet(lot.parquet_path)
+                if lot.data_type == 'CP' and 'X_COORD' in df.columns and 'Y_COORD' in df.columns:
+                    if data_range == 'final':
+                        df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
+                    elif data_range == 'original':
+                        df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
+                
+                lot_items = [it for it in all_items if it.lot_id == lot.id]
+                for it in lot_items:
+                    if it.item_name not in df.columns: continue
+                    values = df[it.item_name].values.astype(float)
+                    exec_qty = int(df[it.item_name].notna().sum())
+                    
+                    ll, ul = it.lower_limit, it.upper_limit
+                    if filter_type == 'filter_by_sigma' and len(values[~np.isnan(values)]) > 1:
+                        clean_vals = values[~np.isnan(values)]
+                        m = np.mean(clean_vals)
+                        s = np.std(clean_vals, ddof=1)
+                        ll = float(m - sigma * s)
+                        ul = float(m + sigma * s)
+                    
+                    filtered = apply_filter(values, filter_type, it.lower_limit, it.upper_limit, sigma)
+                    realtime_stats[lot.id][it.item_name] = calc_param_stats(filtered, ll, ul, exec_qty)
+
+        # 按 lot_id 和 item_name 组织数据
+        item_data_map = defaultdict(dict)
+        for it in all_items:
+            if filter_type != 'all' and it.lot_id in realtime_stats and it.item_name in realtime_stats[it.lot_id]:
+                item_data_map[it.item_name][it.lot_id] = realtime_stats[it.lot_id][it.item_name]
+            else:
+                item_data_map[it.item_name][it.lot_id] = {
+                    "mean": it.mean,
+                    "stdev": it.stdev,
+                    "min_val": it.min_val,
+                    "max_val": it.max_val,
+                    "cpk": it.cpk,
+                    "yield_rate": it.yield_rate,
+                    "fail_count": it.fail_count,
+                    "exec_qty": it.exec_qty,
                 }
-        params.append(row)
 
-    return {
-        "lots": [{"id": l.id, "filename": l.filename, "lot_id": l.lot_id} for l in ordered_lots],
-        "params": params,
+        # 以第一个LOT的参数顺序为基准
+        ref_items = db.query(TestItem).filter(
+            TestItem.lot_id == ordered_lots[0].id,
+            TestItem.site == 0
+        ).order_by(TestItem.item_number).all()
+
+        params = []
+        for ref in ref_items:
+            row = {
+                "item_number": ref.item_number,
+                "item_name": ref.item_name,
+                "unit": ref.unit,
+                "lower_limit": ref.lower_limit,
+                "upper_limit": ref.upper_limit,
+                "lots": {},
+                "overall_stats": {}
+            }
+            
+            lots_with_data = item_data_map.get(ref.item_name, {})
+            
+            for lot in ordered_lots:
+                it_dict = lots_with_data.get(lot.id)
+                if it_dict:
+                    row["lots"][str(lot.id)] = it_dict
+
+            # 计算 overall_stats
+            lots_stats = [l for l in row["lots"].values() if l.get("exec_qty") and l.get("exec_qty") > 0]
+            total_qty = sum(l["exec_qty"] for l in lots_stats)
+            
+            if total_qty > 0:
+                # 均值合并
+                sum_val = sum(l["mean"] * l["exec_qty"] for l in lots_stats if l.get("mean") is not None)
+                overall_mean = sum_val / total_qty
+                
+                # 极值合并
+                overall_min = min((l["min_val"] for l in lots_stats if l.get("min_val") is not None), default=None)
+                overall_max = max((l["max_val"] for l in lots_stats if l.get("max_val") is not None), default=None)
+                
+                # Fail/Yield 合并
+                overall_fail = sum(l["fail_count"] for l in lots_stats if l.get("fail_count") is not None)
+                overall_yield = 1 - (overall_fail / total_qty)
+                
+                # CPK 简化计算 (仅基于合并均值)
+                overall_cpk = None
+                overall_stdev = None
+                if ref.lower_limit is not None or ref.upper_limit is not None:
+                    overall_cpk = min((l["cpk"] for l in lots_stats if l.get("cpk") is not None), default=None)
+                
+                # Stdev 合并 (方差加权平均)
+                try:
+                    sum_sq = sum(l["exec_qty"] * ((l.get("stdev") or 0)**2 + (l.get("mean") or 0)**2) 
+                                 for l in lots_stats if l.get("mean") is not None)
+                    overall_var = (sum_sq / total_qty) - overall_mean**2
+                    overall_stdev = math.sqrt(max(0, overall_var))
+                except:
+                    overall_stdev = None
+
+                row["overall_stats"] = {
+                    "mean": overall_mean,
+                    "stdev": overall_stdev,
+                    "exec_qty": total_qty,
+                    "min_val": overall_min,
+                    "max_val": overall_max,
+                    "fail_count": overall_fail,
+                    "yield_rate": overall_yield,
+                    "cpk": overall_cpk
+                }
+
+            params.append(row)
+
+        return {
+            "lots": [{"id": l.id, "filename": l.filename, "lot_id": l.lot_id} for l in ordered_lots],
+            "params": params,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/multi/export_items/start")
+def start_multi_export_test_items(
+    lot_ids: str = Query(...),
+    filter_type: str = Query("all"),
+    sigma: float = Query(3.0),
+    data_range: str = Query("final"),
+    chars_row: int = Query(3),
+    selected_items: str = Query(""),
+    single_lot_name: str = Query("all_lot"),
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+):
+    """启动多LOT异步导出任务"""
+    task_id = str(uuid.uuid4())
+    export_tasks[task_id] = {
+        "status": "processing",
+        "progress": 0,
+        "result": None,
+        "filename": f"MultiLOT_Report_{filter_type}.xlsx",
+        "created_at": time.time()
     }
+    
+    background_tasks.add_task(
+        run_multi_export_task,
+        task_id, lot_ids, filter_type, sigma, data_range, chars_row, selected_items, single_lot_name, db
+    )
+    
+    return {"task_id": task_id}
+
+def run_multi_export_task(
+    task_id: str,
+    lot_ids: str,
+    filter_type: str,
+    sigma: float,
+    data_range: str,
+    chars_row: int,
+    selected_items: str,
+    single_lot_name: str,
+    db: Session
+):
+    """后台执行多LOT导出任务"""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import xlsxwriter
+        import pandas as pd
+        import io
+        import numpy as np
+        import os
+
+        export_tasks[task_id]["progress"] = 5
+        
+        ids = [int(x) for x in lot_ids.split(",") if x.strip()]
+        lots = db.query(Lot).filter(Lot.id.in_(ids)).all()
+        if not lots:
+            export_tasks[task_id].update({"status": "failed", "error": "LOT不存在"})
+            return
+
+        # 1. 获取汇总数据 (使用已有的 multi/items 逻辑)
+        multi_data = get_multi_lot_items(lot_ids, filter_type, sigma, data_range, db)
+        items_summary = multi_data['params']
+        
+        if selected_items:
+            try:
+                sel_nums = [int(x.strip()) for x in selected_items.split(',') if x.strip()]
+                if sel_nums:
+                    items_summary = [it for it in items_summary if it['item_number'] in sel_nums]
+            except ValueError:
+                pass
+
+        export_tasks[task_id]["progress"] = 15
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            
+            # ─── Sheet 1: Stats & Info ───
+            stats_sheet = workbook.add_worksheet('Stats')
+            
+            # 定义格式
+            info_label_fmt = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#F2F2F2', 'align': 'left'})
+            info_val_fmt = workbook.add_format({'border': 1, 'align': 'left'})
+            header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1, 'align': 'center'})
+            cell_fmt = workbook.add_format({'border': 1, 'align': 'center'})
+            
+            # 多LOT汇总信息
+            total_die = sum(l.die_count or 0 for l in lots)
+            total_pass = sum(l.pass_count or 0 for l in lots)
+            avg_yield = total_pass / total_die if total_die > 0 else 0
+            
+            display_name = f"{single_lot_name} ({len(lots)} LOTs)"
+            
+            info_data = [
+                ("名称", display_name),
+                ("LOT数量", str(len(lots))),
+                ("测试数量", str(total_die)),
+                ("PASS数量", str(total_pass)),
+                ("平均良率", f"{avg_yield*100:.2f}%"),
+                ("导出时间", pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'))
+            ]
+            
+            for row_idx, (label, val) in enumerate(info_data):
+                stats_sheet.write(row_idx, 0, label, info_label_fmt)
+                stats_sheet.write(row_idx, 1, val, info_val_fmt)
+            
+            row = len(info_data) + 2
+            
+            # 整理统计数据
+            df_stats_list = []
+            for it in items_summary:
+                s = it.get('overall_stats', {})
+                df_stats_list.append({
+                    'item_number': it['item_number'],
+                    'item_name': it['item_name'],
+                    'unit': it['unit'],
+                    'lower_limit': it['lower_limit'],
+                    'upper_limit': it['upper_limit'],
+                    'min_val': s.get('min_val'),
+                    'max_val': s.get('max_val'),
+                    'exec_qty': s.get('exec_qty'),
+                    'fail_count': s.get('fail_count'),
+                    'fail_rate': (s.get('fail_count') / s.get('exec_qty')) if s.get('exec_qty') else 0,
+                    'yield_rate': s.get('yield_rate'),
+                    'mean': s.get('mean'),
+                    'stdev': s.get('stdev'),
+                    'cpk': s.get('cpk')
+                })
+            
+            df_stats = pd.DataFrame(df_stats_list)
+            if not df_stats.empty:
+                column_mapping = {
+                    'item_number': '#', 'item_name': 'TestItem', 'lower_limit': 'L.Limit',
+                    'upper_limit': 'U.Limit', 'unit': 'Units', 'min_val': 'Min',
+                    'max_val': 'Max', 'exec_qty': 'Exec Qty', 'fail_count': 'Failures',
+                    'fail_rate': 'Fail Rate', 'yield_rate': 'Yield', 'mean': 'Mean',
+                    'stdev': 'Stdev', 'cpk': 'CPK'
+                }
+                existing_cols = [c for c in column_mapping.keys() if c in df_stats.columns]
+                df_stats = df_stats[existing_cols].rename(columns=column_mapping)
+                
+                # 写入参数统计表
+                start_stats_row = row
+                num_rows = len(df_stats)
+                num_cols = len(df_stats.columns)
+                
+                for r_idx in range(num_rows + 1):
+                    for c_idx in range(num_cols):
+                        is_header = (r_idx == 0)
+                        col_name = df_stats.columns[c_idx]
+                        fmt_props = {'border': 1, 'valign': 'vcenter'}
+                        
+                        if r_idx == 0: fmt_props['top'] = 2
+                        if r_idx == num_rows: fmt_props['bottom'] = 2
+                        if c_idx == 0: fmt_props['left'] = 2
+                        if c_idx == num_cols - 1: fmt_props['right'] = 2
+                        
+                        if is_header:
+                            fmt_props.update({'bold': True, 'align': 'center', 'bg_color': '#D9D9D9'})
+                            val = col_name
+                        else:
+                            fmt_props['align'] = 'left' if col_name == 'TestItem' else 'center'
+                            val = df_stats.iloc[r_idx - 1, c_idx]
+                            if pd.isna(val): val = ""
+                            if col_name in ['Fail Rate', 'Yield'] and isinstance(val, (int, float)):
+                                fmt_props['num_format'] = '0.00%'
+                            if col_name == 'CPK' and isinstance(val, (int, float)):
+                                if val < 1.0: fmt_props.update({'font_color': 'red', 'bold': True})
+                                elif val < 1.33: fmt_props.update({'font_color': '#FF8C00'})
+                        
+                        cell_fmt = workbook.add_format(fmt_props)
+                        stats_sheet.write(start_stats_row + r_idx, c_idx, val, cell_fmt)
+                
+                stats_sheet.set_column(0, 0, 8)
+                stats_sheet.set_column(1, 1, 40)
+                if num_cols > 2:
+                    stats_sheet.set_column(2, num_cols - 1, 12)
+
+            export_tasks[task_id]["progress"] = 30
+
+            # ─── Sheet 2: Histograms ───
+            hist_sheet = workbook.add_worksheet('Histograms')
+            hist_sheet.set_column(0, 0, 10)
+            hist_sheet.set_column(1, 1, 30)
+            hist_sheet.set_column(2, 50, 10)
+            
+            header_format = workbook.add_format({'bold': True, 'font_color': 'blue'})
+            hist_sheet.write(0, 2, "Data:", header_format)
+            hist_sheet.write(0, 3, display_name, header_format)
+            
+            from app.services.stats import calc_hist_x_range
+            
+            def draw_stats_line(ax_obj, y_pos, items_groups):
+                # items_groups 为 list of list, 每一项绘制一行
+                for idx, group in enumerate(items_groups):
+                    line_text = "   ".join([f"{k}{v}" for k, v in group])
+                    # y 轴位置向下偏移
+                    current_y = y_pos - (idx * 0.05)
+                    ax_obj.text(0.5, current_y, line_text, transform=ax_obj.transAxes, 
+                                color='#000000', fontweight='bold', fontsize=8, ha='center')
+
+            fig, ax = plt.subplots(figsize=(5.47, 4.5)) 
+            LOT_COLORS = ['#ff6b6b', '#4dabf7', '#69db7c', '#ffd43b', '#e599f7', '#74c0fc', '#a9e34b', '#ffa94d']
+            
+            total_items = len(items_summary)
+            for i, item in enumerate(items_summary):
+                # 进度: 30% -> 80%
+                current_progress = 30 + int((i / total_items) * 50) if total_items > 0 else 30
+                export_tasks[task_id]["progress"] = current_progress
+
+                p_name = item['item_name']
+                p_num = item['item_number']
+                
+                # 获取多LOT直方图数据
+                hist_data = get_multi_lot_param_hist(lot_ids, p_name, filter_type, sigma, data_range, db=db)
+                
+                ll, ul = hist_data['lower_limit'], hist_data['upper_limit']
+                unit = hist_data['unit'] or ''
+                edges = np.array(hist_data['global_edges'])
+                
+                ax.clear()
+                ax.set_axisbelow(True)
+                ax.yaxis.grid(True, linestyle='--', alpha=0.5, zorder=0)
+                
+                overall_counts = np.zeros(len(edges) - 1)
+                for lot_hist in hist_data['lots']:
+                    overall_counts += np.array(lot_hist['counts'])
+
+                exceeds_limit = hist_data.get('exceeds_limit', False)
+                ll_bin_idx = hist_data.get('ll_bin_index')
+                ul_bin_idx = hist_data.get('ul_bin_index')
+                o_stats = hist_data.get('overall_stats', {})
+
+                if exceeds_limit:
+                    # 如果超出范围，使用不均匀轴 (按索引绘图)
+                    bar_w = 0.9
+                    ax.bar(range(len(overall_counts)), overall_counts, width=bar_w, alpha=0.7, color='#4dabf7', label=display_name, zorder=3)
+                    
+                    if ll_bin_idx is not None:
+                        ax.axvline(ll_bin_idx, color='red', linestyle='--', linewidth=1.5, zorder=4)
+                        ax.text(ll_bin_idx, ax.get_ylim()[1]*0.5, f'LL:{ll}', color='red', fontsize=7, ha='left', va='center', rotation=90)
+                    if ul_bin_idx is not None:
+                        ax.axvline(ul_bin_idx, color='red', linestyle='--', linewidth=1.5, zorder=4)
+                        ax.text(ul_bin_idx, ax.get_ylim()[1]*0.5, f'UL:{ul}', color='red', fontsize=7, ha='right', va='center', rotation=90)
+                    
+                    tick_indices = np.linspace(0, len(edges)-2, 11).astype(int)
+                    ax.set_xticks(tick_indices)
+                    ax.set_xticklabels([f"{edges[t]:.3f}" for t in tick_indices], rotation=30)
+                else:
+                    # 均匀分布 (按实际值绘图)
+                    bin_centers = (edges[:-1] + edges[1:]) / 2
+                    bin_w = edges[1] - edges[0] if len(edges) > 1 else 1
+                    
+                    if o_stats.get('min_val') is not None:
+                        data_min, data_max = float(o_stats['min_val']), float(o_stats['max_val'])
+                        edges_min, edges_max = float(edges[0]), float(edges[-1])
+                        x_range_info = calc_hist_x_range(data_min, data_max, ll, ul, edges_min, edges_max)
+                        x_min, x_max = x_range_info['x_min'], x_range_info['x_max']
+                        
+                        # 确保柱子在极窄情况下依然可见 (参考 AnalysisView 逻辑)
+                        bar_w = max(bin_w * 0.9, (x_max - x_min) * 0.015)
+                        
+                        # 处理最小高度 (可选，但建议加上以保持一致性)
+                        max_count = np.max(overall_counts) if len(overall_counts) > 0 else 1
+                        min_h = max_count * 0.02
+                        final_counts = [max(c, min_h) if 0 < c < max_count * 0.02 else c for c in overall_counts]
+
+                        ax.bar(bin_centers, final_counts, width=bar_w, alpha=0.7, color='#4dabf7', label=display_name, zorder=3)
+                        
+                        if ll is not None:
+                            ax.axvline(ll, color='red', linestyle='--', linewidth=1.5, zorder=4)
+                            ax.text(ll, ax.get_ylim()[1]*0.5, f'LL:{ll}', color='red', fontsize=7, ha='left', va='center', rotation=90)
+                        if ul is not None:
+                            ax.axvline(ul, color='red', linestyle='--', linewidth=1.5, zorder=4)
+                            ax.text(ul, ax.get_ylim()[1]*0.5, f'UL:{ul}', color='red', fontsize=7, ha='right', va='center', rotation=90)
+                        
+                        ax.set_xlim(x_min, x_max)
+                        ax.set_xticks(x_range_info['ticks'])
+                        ax.xaxis.set_major_formatter(plt.FormatStrFormatter('%.3f'))
+                        ax.tick_params(axis='x', rotation=30)
+
+                ax.set_title(f"{p_num}.{p_name}", fontsize=12, fontweight='bold', color='black', pad=32)
+                cpk_val = o_stats.get('cpk', 0) or 0
+                stats_info_groups = [
+                    [
+                        ("Min=", f"{o_stats.get('min_val', 0):.4f}"), 
+                        ("Max=", f"{o_stats.get('max_val', 0):.4f}")
+                    ],
+                    [
+                        ("Mean=", f"{o_stats.get('mean', 0):.4f}"),
+                        ("Stdev=", f"{o_stats.get('stdev', 0):.4f}" if o_stats.get('stdev') is not None else "0.0000"),
+                        ("CPK=", f"{cpk_val:.4f}")
+                    ]
+                ]
+                draw_stats_line(ax, 1.08, stats_info_groups)
+                ax.set_ylabel("Parts", fontsize=8)
+                ax.set_xlabel(unit, fontsize=12, fontweight='bold', color='black')
+                ax.tick_params(labelsize=7)
+                
+                # 添加 Legend 显示汇总 LOT 信息
+                ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.22), ncol=4, fontsize=7, frameon=False)
+                
+                fig.tight_layout()
+                img_data = io.BytesIO()
+                plt.savefig(img_data, format='png', dpi=100)
+                img_data.seek(0)
+                
+                group_idx = i // chars_row
+                within_group_idx = i % chars_row
+                r_idx = group_idx * 22 + 2
+                c_idx = within_group_idx * 7 + 2
+                info_r_idx = group_idx * 22 + 6 + within_group_idx
+                hist_sheet.write(info_r_idx, 0, p_num)
+                hist_sheet.write(info_r_idx, 1, p_name)
+                hist_sheet.insert_image(r_idx, c_idx, f'h_{i}.png', {'image_data': img_data, 'x_scale': 1.0, 'y_scale': 1.0})
+
+            plt.close(fig)
+            export_tasks[task_id]["progress"] = 80
+
+            # ─── Sheet 3: Bin Info ───
+            bin_sheet = workbook.add_worksheet('BinInfo')
+            
+            multi_bin_data = get_multi_lot_bin_summary(lot_ids, data_range, db)
+            combined_bins = []
+            total_all_lots = 0
+            for b in multi_bin_data['bins']:
+                count = sum(l['count'] for l in b['lots'].values())
+                total_all_lots += count
+                combined_bins.append({
+                    'bin_number': b['bin_number'],
+                    'bin_name': b['bin_name'],
+                    'count': count
+                })
+            for b in combined_bins:
+                b['pct'] = b['count'] / total_all_lots if total_all_lots > 0 else 0
+
+            headers = ['Bin', 'Name', 'Total Count', '% of total']
+            for c, h in enumerate(headers):
+                bin_sheet.write(0, c, h, header_fmt)
+            
+            # 设置列宽
+            bin_sheet.set_column(0, 3, 12)
+            bin_sheet.set_column(1, 1, 25)
+            
+            # 统一样式：黑色字体
+            black_cell_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black'})
+            black_left_fmt = workbook.add_format({'border': 1, 'align': 'left', 'font_color': 'black'})
+            black_pct_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black', 'num_format': '0.00%'})
+            
+            row = 1
+            for b in combined_bins:
+                bin_sheet.write(row, 0, b['bin_number'], black_cell_fmt)
+                bin_sheet.write(row, 1, b['bin_name'], black_left_fmt)
+                bin_sheet.write(row, 2, b['count'], black_cell_fmt)
+                bin_sheet.write(row, 3, b['pct'], black_pct_fmt)
+                row += 1
+
+            export_tasks[task_id]["progress"] = 95
+
+
+            export_tasks[task_id]["progress"] = 95
+
+        output.seek(0)
+        export_tasks[task_id].update({
+            "status": "completed",
+            "progress": 100,
+            "result": output
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        export_tasks[task_id].update({"status": "failed", "error": str(e)})
+
 
 
 @router.get("/multi/param_hist")
@@ -1900,7 +2385,7 @@ def get_multi_lot_param_hist(
         if param_name not in df.columns:
             lot_raw_values[lot.id] = np.array([])
             continue
-        if 'X_COORD' in df.columns and 'Y_COORD' in df.columns:
+        if lot.data_type == 'CP' and 'X_COORD' in df.columns and 'Y_COORD' in df.columns:
             if data_range == 'final':
                 df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
             elif data_range == 'original':
@@ -2053,10 +2538,14 @@ def get_multi_lot_wafer_bin_maps(
             result.append({"lot_id": lot.id, "filename": lot.filename, "has_map": False, "data": []})
             continue
         df = df.dropna(subset=['X_COORD', 'Y_COORD', 'SOFT_BIN'])
-        if data_range == 'final':
-            df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
-        elif data_range == 'original':
-            df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
+        # 只有 CP 数据才进行去重和地图显示
+        has_map = lot.data_type == 'CP'
+        if has_map:
+            if data_range == 'final':
+                df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='last')
+            elif data_range == 'original':
+                df = df.drop_duplicates(subset=['X_COORD', 'Y_COORD'], keep='first')
+
         tmp = df[['X_COORD', 'Y_COORD', 'SOFT_BIN']].copy()
         tmp.columns = ['x', 'y', 'bin']
         tmp['x'] = tmp['x'].astype(int)
@@ -2067,8 +2556,426 @@ def get_multi_lot_wafer_bin_maps(
             "filename": lot.filename,
             "lot_id_str": lot.lot_id,
             "wafer_id": lot.wafer_id,
-            "has_map": True,
+            "has_map": has_map,
             "data": tmp.to_dict('records'),
         })
 
     return {"maps": result}
+
+@router.get("/idle_check/config")
+def get_idle_check_config(program_name: str, db: Session = Depends(get_db)):
+    config = db.query(IdleCheckConfig).filter(IdleCheckConfig.program_name == program_name).first()
+    if not config:
+        return {"program_name": program_name, "params": [], "threshold": 2}
+    return config
+
+@router.post("/idle_check/config")
+def set_idle_check_config(config_in: IdleCheckConfigCreate, db: Session = Depends(get_db)):
+    config = db.query(IdleCheckConfig).filter(IdleCheckConfig.program_name == config_in.program_name).first()
+    if config:
+        config.params = config_in.params
+        config.threshold = config_in.threshold
+    else:
+        config = IdleCheckConfig(
+            program_name=config_in.program_name,
+            params=config_in.params,
+            threshold=config_in.threshold
+        )
+        db.add(config)
+    db.commit()
+    db.refresh(config)
+    return config
+
+@router.get("/lot/{lot_id}/idle_check")
+def perform_idle_check(
+    lot_id: int, 
+    threshold: Optional[int] = Query(None),
+    data_filter: str = Query("all"), # "all" or "pass_only"
+    weights: Optional[str] = Query(None), # 逗号分隔的权重字符串
+    db: Session = Depends(get_db)
+):
+    lot = db.query(Lot).filter(Lot.id == lot_id).first()
+    if not lot or not lot.parquet_path:
+        raise HTTPException(status_code=404, detail="数据不存在")
+
+    # 获取程序的配置
+    config = db.query(IdleCheckConfig).filter(IdleCheckConfig.program_name == lot.program).first()
+    if not config or not config.params:
+        # 如果没有配置，返回空列表，前端引导选择参数
+        return {"lot_id": lot_id, "program": lot.program, "data": [], "has_config": False}
+
+    df = pd.read_parquet(lot.parquet_path)
+    
+    # 数据过滤
+    if data_filter == 'pass_only' and 'SOFT_BIN' in df.columns:
+        df = df[df['SOFT_BIN'].isin([1, 2])].copy()
+    
+    # 我们需要原始顺序来检测 Handler 压死
+    # 如果有坐标，我们也保留，但不去重
+    
+    selected_params = [p for p in config.params if p in df.columns]
+    if not selected_params:
+         return {"lot_id": lot_id, "program": lot.program, "data": [], "has_config": True, "error": "选中的参数在数据中不存在"}
+
+    # 解析自定义权重
+    use_weights = []
+    if weights:
+        try:
+            use_weights = [int(w) for w in weights.split(',')]
+        except:
+            use_weights = []
+            
+    if not use_weights or len(use_weights) < len(selected_params):
+        use_weights = [i + 1 for i in range(len(selected_params))]
+
+    # 计算指纹值: fingerprint = sum(val[i] * weight[i])
+    # 转换为 float 处理 NaN
+    param_data = df[selected_params].astype(float)
+    fingerprints = []
+    for i, p in enumerate(selected_params):
+        fingerprints.append(param_data[p] * use_weights[i])
+    
+    df['fingerprint'] = pd.concat(fingerprints, axis=1).sum(axis=1)
+    
+    # 检测连续重复
+    use_threshold = threshold if threshold is not None else config.threshold
+    
+    # 标记报警
+    df['is_alarm'] = False
+    
+    # 获取 SITE_NUM，如果没有则默认为 Site 0
+    site_col = 'SITE_NUM' if 'SITE_NUM' in df.columns else None
+    
+    if site_col:
+        sites = df[site_col].unique()
+        for site in sites:
+            site_mask = df[site_col] == site
+            site_df = df[site_mask].copy()
+            # 这里的 site_df 已经保持了原始索引顺序
+            fp_values = site_df['fingerprint'].values
+            alarm_mask = np.zeros(len(fp_values), dtype=bool)
+            
+            n = len(fp_values)
+            if n > 0:
+                count = 1
+                for i in range(1, n):
+                    if fp_values[i] == fp_values[i-1] and not np.isnan(fp_values[i]):
+                        count += 1
+                    else:
+                        if count >= use_threshold:
+                            alarm_mask[i-count : i] = True
+                        count = 1
+                if count >= use_threshold:
+                    alarm_mask[n-count : n] = True
+            
+            # 将报警标记回原 df
+            df.loc[site_mask, 'is_alarm'] = alarm_mask
+    else:
+        # 无 Site 信息的情况（单 Site）
+        fp_values = df['fingerprint'].values
+        n = len(fp_values)
+        if n > 0:
+            count = 1
+            for i in range(1, n):
+                if fp_values[i] == fp_values[i-1] and not np.isnan(fp_values[i]):
+                    count += 1
+                else:
+                    if count >= use_threshold:
+                        df.iloc[i-count : i, df.columns.get_loc('is_alarm')] = True
+                    count = 1
+            if count >= use_threshold:
+                df.iloc[n-count : n, df.columns.get_loc('is_alarm')] = True
+
+    # 准备返回数据
+    cols = ['fingerprint', 'is_alarm']
+    if site_col: cols.append(site_col)
+    if 'X_COORD' in df.columns: cols.append('X_COORD')
+    if 'Y_COORD' in df.columns: cols.append('Y_COORD')
+    
+    result_df = df[cols].copy()
+    result_df['index'] = range(len(result_df))
+    
+    return {
+        "lot_id": lot_id,
+        "program": lot.program,
+        "has_config": True,
+        "params": selected_params,
+        "weights": use_weights[:len(selected_params)],
+        "threshold": use_threshold,
+        "data_filter": data_filter,
+        "has_sites": site_col is not None,
+        "data": result_df.to_dict('records')
+    }
+
+@router.post("/lot/{lot_id}/idle_check/export/start")
+def start_idle_check_export(
+    lot_id: int,
+    background_tasks: BackgroundTasks,
+    threshold: Optional[int] = Query(None),
+    data_filter: str = Query("all"),
+    weights: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    task_id = str(uuid.uuid4())
+    export_tasks[task_id] = {"status": "processing", "progress": 0, "result": None}
+    background_tasks.add_task(run_idle_check_export_task, lot_id, threshold, data_filter, weights, task_id, db)
+    return {"task_id": task_id}
+
+@router.get("/idle_check/export/status/{task_id}")
+def get_idle_check_export_status(task_id: str):
+    if task_id not in export_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    task = export_tasks[task_id]
+    return {
+        "status": task["status"],
+        "progress": task["progress"],
+        "error": task.get("error")
+    }
+
+@router.get("/idle_check/export/download/{task_id}")
+def download_idle_check_export(task_id: str, db: Session = Depends(get_db)):
+    if task_id not in export_tasks or export_tasks[task_id]["status"] != "completed":
+        raise HTTPException(status_code=404, detail="文件未就绪")
+    
+    task = export_tasks[task_id]
+    output = task["result"]
+    filename = task.get("filename", "IdleCheck_Report.xlsx")
+    
+    # 重新包装为 BytesIO
+    output.seek(0)
+    encoded_filename = quote(filename)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+            "Access-Control-Expose-Headers": "Content-Disposition"
+        }
+    )
+
+def run_idle_check_export_task(lot_id: int, threshold: Optional[int], data_filter: str, weights: Optional[str], task_id: str, db: Session):
+    try:
+        export_tasks[task_id]["progress"] = 10
+        # 复用计算逻辑
+        check_res = perform_idle_check(lot_id, threshold, data_filter, weights, db)
+        export_tasks[task_id]["progress"] = 30
+        
+        lot = db.query(Lot).filter(Lot.id == lot_id).first()
+        df = pd.read_parquet(lot.parquet_path)
+        if data_filter == 'pass_only' and 'SOFT_BIN' in df.columns:
+            df = df[df['SOFT_BIN'].isin([1, 2])].copy()
+            
+        export_tasks[task_id]["progress"] = 50
+        
+        # 标记报警行
+        alarms = [d['is_alarm'] for d in check_res['data']]
+        df['is_alarm'] = alarms
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='IdleCheck_RawData')
+            workbook = writer.book
+            worksheet = writer.sheets['IdleCheck_RawData']
+            
+            # 格式：报警行第一列变红
+            alarm_format = workbook.add_format({'bg_color': '#FF0000', 'font_color': '#FFFFFF'})
+            
+            total_rows = len(alarms)
+            for i, is_alarm in enumerate(alarms):
+                if is_alarm:
+                    # 染色第二列 (col_index = 1)
+                    worksheet.write(i + 1, 1, df.iloc[i, 1], alarm_format)
+                
+                # 模拟进度 50% -> 95%
+                if i % 100 == 0:
+                    export_tasks[task_id]["progress"] = 50 + int((i / total_rows) * 45)
+                    
+        output.seek(0)
+        export_tasks[task_id].update({
+            "status": "completed",
+            "progress": 100,
+            "result": output,
+            "filename": f"IdleCheck_{lot.filename}.xlsx"
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        export_tasks[task_id].update({"status": "failed", "error": str(e)})
+
+# 原有的直接下载路由保留，作为兼容或快速下载
+@router.get("/lot/{lot_id}/idle_check/export")
+def export_idle_check(
+    lot_id: int,
+    threshold: Optional[int] = Query(None),
+    data_filter: str = Query("all"),
+    db: Session = Depends(get_db)
+):
+    # 此处逻辑建议统一使用异步导出。为了兼容性，我们简单实现一个同步导出。
+    # 创建一个临时任务 ID
+    import uuid
+    task_id = str(uuid.uuid4())
+    export_tasks[task_id] = {"status": "processing", "progress": 0}
+    
+    # 既然是同步接口，直接调用任务逻辑（这里会阻塞直到完成，适合小文件）
+    run_idle_check_export_task(lot_id, threshold, data_filter, task_id, db)
+    
+    task = export_tasks.get(task_id)
+    if task and task.get("status") == "completed":
+        from fastapi.responses import StreamingResponse
+        import urllib.parse
+        filename = task["filename"]
+        encoded_filename = urllib.parse.quote(filename)
+        return StreamingResponse(
+            task["result"],
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+            }
+        )
+    else:
+        raise HTTPException(status_code=500, detail=task.get("error", "导出失败"))
+
+@router.post("/lot/{lot_id}/idle_check/corr")
+def perform_corr_processing(
+    lot_id: int,
+    threshold: Optional[int] = Query(None),
+    data_filter: str = Query("all"),
+    weights: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Correlation处理：
+    1. 计算指纹值
+    2. 找出跨 Site 匹配的共同指纹
+    3. 对齐数据，重新标记 TEST_NUM
+    4. 删掉无法匹配的数据
+    5. 保存为新 LOT (_corr 结尾)
+    """
+    lot = db.query(Lot).filter(Lot.id == lot_id).first()
+    if not lot or not lot.parquet_path:
+        raise HTTPException(status_code=404, detail="数据不存在")
+
+    # 获取程序的配置
+    config = db.query(IdleCheckConfig).filter(IdleCheckConfig.program_name == lot.program).first()
+    if not config or not config.params:
+        raise HTTPException(status_code=400, detail="未配置指纹参数")
+
+    df = pd.read_parquet(lot.parquet_path)
+    
+    # 数据过滤
+    if data_filter == 'pass_only' and 'SOFT_BIN' in df.columns:
+        df = df[df['SOFT_BIN'].isin([1, 2])].copy()
+    
+    selected_params = [p for p in config.params if p in df.columns]
+    if not selected_params:
+         raise HTTPException(status_code=400, detail="选中的参数在数据中不存在")
+
+    # 解析权重
+    use_weights = []
+    if weights:
+        try: use_weights = [int(w) for w in weights.split(',')]
+        except: use_weights = []
+    if not use_weights or len(use_weights) < len(selected_params):
+        use_weights = [i + 1 for i in range(len(selected_params))]
+
+    # 计算指纹值
+    param_data = df[selected_params].astype(float)
+    fingerprints = []
+    for i, p in enumerate(selected_params):
+        fingerprints.append(param_data[p] * use_weights[i])
+    df['fingerprint'] = pd.concat(fingerprints, axis=1).sum(axis=1)
+
+    # Corr 处理逻辑
+    if 'SITE_NUM' not in df.columns:
+        raise HTTPException(status_code=400, detail="数据缺少 Site 信息，无法进行 Site 间对比")
+    
+    sites = sorted(df['SITE_NUM'].unique().tolist())
+    if len(sites) < 2:
+        raise HTTPException(status_code=400, detail="Site 数量不足，无法进行 Site 间对比")
+
+    # 找出所有 Site 都有的指纹值 (精确匹配)
+    site_dfs = {site: df[df['SITE_NUM'] == site] for site in sites}
+    site_fps = {site: set(site_dfs[site]['fingerprint'].dropna().unique()) for site in sites}
+    
+    common_fps = set.intersection(*site_fps.values())
+    if not common_fps:
+        raise HTTPException(status_code=400, detail="未找到跨 Site 匹配的共同指纹数据")
+
+    # 按第一个 Site 的原始出现顺序排列共同指纹
+    ref_site = sites[0]
+    ordered_fps = []
+    seen = set()
+    for fp in site_dfs[ref_site]['fingerprint']:
+        if fp in common_fps and fp not in seen:
+            ordered_fps.append(fp)
+            seen.add(fp)
+
+    # 对齐并重新编号
+    aligned_rows = []
+    for i, fp in enumerate(ordered_fps):
+        test_num = i + 1
+        for site in sites:
+            match = site_dfs[site][site_dfs[site]['fingerprint'] == fp].head(1).copy()
+            match['TEST_NUM'] = test_num
+            aligned_rows.append(match)
+
+    new_df = pd.concat(aligned_rows, ignore_index=True)
+    
+    # 创建新 LOT
+    new_filename = f"{lot.filename}_corr"
+    new_lot = Lot(
+        filename=new_filename,
+        product_name=lot.product_name,
+        lot_id=lot.lot_id,
+        wafer_id=lot.wafer_id,
+        program=lot.program,
+        test_machine=lot.test_machine,
+        handler=lot.handler,
+        data_type=lot.data_type,
+        test_date=lot.test_date,
+        status='processing',
+        data_source='manual',
+        storage_type='local',
+        upload_date=datetime.now(timezone.utc),
+    )
+    db.add(new_lot)
+    db.commit()
+    db.refresh(new_lot)
+
+    # 保存 Parquet
+    parquet_dir = os.path.join(UPLOAD_DIR, 'parquet')
+    os.makedirs(parquet_dir, exist_ok=True)
+    parquet_path = os.path.join(parquet_dir, f"lot_{new_lot.id}.parquet")
+    new_df.to_parquet(parquet_path, index=False)
+    new_lot.parquet_path = parquet_path
+    db.commit()
+
+    # 计算统计
+    ref_items = db.query(TestItem).filter(TestItem.lot_id == lot.id, TestItem.site == 0).all()
+    param_names = [it.item_name for it in ref_items]
+    param_ll = {it.item_name: it.lower_limit for it in ref_items}
+    param_ul = {it.item_name: it.upper_limit for it in ref_items}
+    param_units = {it.item_name: it.unit for it in ref_items}
+    
+    bin_rows = db.query(BinSummary).filter(BinSummary.lot_id == lot.id, BinSummary.site == 0, BinSummary.data_range == 'final').all()
+    bin_definitions = {b.bin_number: {'name': b.bin_name} for b in bin_rows}
+
+    from app.services.parsers.base import ParsedData
+    from app.services.stats import save_stats_to_db
+    
+    parsed = ParsedData(
+        data=new_df,
+        param_names=param_names,
+        param_ll=param_ll,
+        param_ul=param_ul,
+        param_units=param_units,
+        bin_definitions=bin_definitions,
+    )
+    
+    save_stats_to_db(new_lot, parsed, db, [1, 2])
+    
+    new_lot.status = 'processed'
+    new_lot.finish_date = datetime.now(timezone.utc)
+    db.commit()
+    
+    return {"id": new_lot.id, "filename": new_lot.filename}

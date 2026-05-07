@@ -50,10 +50,11 @@
     <div class="table-container">
       <ag-grid-vue
         class="ag-theme-alpine"
+        :theme="'legacy'"
         :rowData="lots"
         :columnDefs="columnDefs"
         :defaultColDef="defaultColDef"
-        rowSelection="multiple"
+        :rowSelection="rowSelection"
         :pagination="true"
         :paginationPageSize="50"
         @selection-changed="onSelectionChanged"
@@ -147,11 +148,47 @@
       </div>
     </div>
   </div>
+
+  <!-- Idle Check 参数选择弹窗 -->
+  <div v-if="checkDialog" class="modal-overlay" @click.self="checkDialog = false">
+    <div class="modal check-modal">
+      <h3>设置 Check 监控参数 (程序: {{ currentProgram }})</h3>
+      <p style="font-size:12px;color:#666;margin-bottom:12px">
+        请选择需要参与计算指纹值的寄存器参数。指纹值 = Σ(参数值[i] * (i+1))
+      </p>
+      
+      <div class="param-selector">
+        <div class="selector-header">
+          <input v-model="paramSearch" placeholder="搜索参数..." class="search-input" />
+          <div class="selection-info">已选 {{ selectedParams.length }} 个</div>
+        </div>
+        <div class="param-list">
+          <label v-for="p in filteredParams" :key="p" class="param-item">
+            <input type="checkbox" :value="p" v-model="selectedParams" />
+            <span>{{ p }}</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="field" style="margin-top: 12px;">
+        <label>连续重复报警阈值 (颗)</label>
+        <input type="number" v-model.number="checkThreshold" min="2" max="10" />
+      </div>
+
+      <div v-if="checkError" class="merge-error">{{ checkError }}</div>
+      <div class="modal-actions">
+        <button class="btn" @click="checkDialog = false">取消</button>
+        <button class="btn btn-primary" :disabled="!selectedParams.length || savingConfig" @click="saveCheckConfig">
+          {{ savingConfig ? '保存中...' : '开始分析' }}
+        </button>
+      </div>
+    </div>
+  </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { AgGridVue } from 'ag-grid-vue3'
 import type { GridApi, ColDef } from 'ag-grid-community'
 import api from '@/api'
@@ -169,11 +206,74 @@ const productDialog = ref(false)
 const productForm = ref({ id: 0, program: '', prefix: '', product_name: '' })
 const router = useRouter()
 
+const rowSelection = ref<any>('multiple')
+
 // 合并相关
 const showMergeDialog = ref(false)
 const mergeForm = ref({ new_name: '', new_lot_id: '', new_wafer_id: '' })
 const mergeError = ref('')
 const merging = ref(false)
+// Check 相关
+const checkDialog = ref(false)
+const currentProgram = ref('')
+const currentLotId = ref(0)
+const selectedParams = ref<string[]>([])
+const allParams = ref<string[]>([])
+const paramSearch = ref('')
+const checkThreshold = ref(2)
+const savingConfig = ref(false)
+const checkError = ref('')
+
+const filteredParams = computed(() => {
+  if (!paramSearch.value) return allParams.value
+  const s = paramSearch.value.toLowerCase()
+  return allParams.value.filter(p => p.toLowerCase().includes(s))
+})
+
+async function handleCheckClick(lotId: number, program: string) {
+  currentLotId.value = lotId
+  currentProgram.value = program
+  checkError.value = ''
+  
+  try {
+    // 1. 获取该程序的配置
+    const config: any = await api.get('/analysis/idle_check/config', { params: { program_name: program } })
+    
+    if (config && config.params && config.params.length > 0) {
+      // 已有配置，直接跳转
+      const url = router.resolve(`/lot/${lotId}/idle-check`).href
+      window.open(url, '_blank')
+    } else {
+      // 无配置，获取当前 LOT 的参数列表供选择
+      const items: any[] = await api.get(`/analysis/lot/${lotId}/items_summary`)
+      allParams.value = items.map(it => it.item_name)
+      selectedParams.value = []
+      checkThreshold.value = 2
+      checkDialog.value = true
+    }
+  } catch (e) {
+    alert('获取配置失败')
+  }
+}
+
+async function saveCheckConfig() {
+  savingConfig.value = true
+  try {
+    await api.post('/analysis/idle_check/config', {
+      program_name: currentProgram.value,
+      params: selectedParams.value,
+      threshold: checkThreshold.value
+    })
+    checkDialog.value = false
+    // 跳转
+    const url = router.resolve(`/lot/${currentLotId.value}/idle-check`).href
+    window.open(url, '_blank')
+  } catch (e) {
+    checkError.value = '保存配置失败'
+  } finally {
+    savingConfig.value = false
+  }
+}
 
 function openMergeDialog() {
   const firstLot = selectedRows.value[0]
@@ -219,28 +319,42 @@ const defaultColDef: ColDef = {
   resizable: true,
   sortable: true,
   filter: true,
-  minWidth: 40,
+  floatingFilter: true,
+  suppressFloatingFilterButton: true,
+  minWidth: 80,
 }
 
 const columnDefs: ColDef[] = [
-  { checkboxSelection: true, headerCheckboxSelection: true, width: 40, pinned: 'left', filter: false, sortable: false, suppressMenu: true },
-  { headerName: '序号', valueGetter: 'node.rowIndex + 1', width: 60, pinned: 'left', filter: false, sortable: false, suppressMenu: true },
+  { 
+    headerName: '',
+    width: 40, 
+    pinned: 'left', 
+    checkboxSelection: true, 
+    headerCheckboxSelection: true,
+    filter: false, 
+    sortable: false, 
+    suppressHeaderMenuButton: true 
+  },
+  { headerName: '序号', valueGetter: 'node.rowIndex + 1', width: 60, pinned: 'left', filter: false, sortable: false, suppressHeaderMenuButton: true },
   {
     headerName: '操作',
-    width: 140,
+    width: 170,
     pinned: 'left',
     filter: false,
     sortable: false,
-    suppressMenu: true,
+    suppressHeaderMenuButton: true,
     cellRenderer: (p: any) => {
+      if (!p.data) return ''
       return `
         <div style="display:flex;gap:6px;align-items:center;height:100%">
           <span style="color:#1890ff;cursor:pointer;font-size:12px" data-action="analysis" data-id="${p.data.id}">参数分析</span>
           <span style="color:#52c41a;cursor:pointer;font-size:12px" data-action="bin" data-id="${p.data.id}">BIN分析</span>
+          <span style="color:#722ed1;cursor:pointer;font-size:12px" data-action="check" data-id="${p.data.id}" data-program="${p.data.program}">Check</span>
         </div>
       `
     },
     onCellClicked: (p: any) => {
+      if (!p.data || !p.event) return
       const target = p.event.target as HTMLElement
       const action = target.dataset.action
       const id = target.dataset.id
@@ -252,26 +366,62 @@ const columnDefs: ColDef[] = [
         const url = router.resolve(`/lot/${id}/bin`).href
         window.open(url, '_blank')
       }
+      if (action === 'check') {
+        handleCheckClick(Number(id), target.dataset.program || '')
+      }
     }
   },
   {
     headerName: '文件名',
     field: 'filename',
-    width: 350,
+    width: 300,
     pinned: 'left',
+    filter: 'agTextColumnFilter',
   },
-  { headerName: '批号', field: 'lot_id', width: 130 },
-  { headerName: '晶圆编号', field: 'wafer_id', width: 130 },
-  { headerName: '程序', field: 'program', width: 300 },
-  { headerName: '测试机', field: 'test_machine', width: 100 },
-  { headerName: 'Data Type', field: 'data_type', width: 100 },
-  { headerName: '测试项', field: 'item_count', width: 80 },
-  { headerName: '晶圆总数', field: 'die_count', width: 90 },
-  { headerName: '良品数', field: 'pass_count', width: 90 },
+  {
+      headerName: '产品名',
+      field: 'product_name',
+      width: 120,
+      filter: 'agTextColumnFilter',
+      cellRenderer: (p: any) => {
+          if (p.value) return p.value
+          if (!p.data) return ''
+          return `<span style="color:#1890ff;cursor:pointer" data-id="${p.data.id}" data-program="${p.data.program}">点击设置</span>`
+      },
+      onCellClicked: (p: any) => {
+          if (!p.data || !p.data.program) return
+          showProductDialog(p.data)
+      }
+  },
+  { headerName: '批号', field: 'lot_id', width: 120, filter: 'agTextColumnFilter' },
+  { headerName: '晶圆编号', field: 'wafer_id', width: 120, filter: 'agTextColumnFilter' },
+  { 
+    headerName: '测试项', 
+    field: 'item_count', 
+    width: 100, 
+    filter: 'agNumberColumnFilter',
+    filterParams: { defaultOption: 'greaterThan', buttons: ['reset'] }
+  },
+  { 
+    headerName: '晶圆数', 
+    field: 'die_count', 
+    width: 100, 
+    filter: 'agNumberColumnFilter',
+    filterParams: { defaultOption: 'greaterThan', buttons: ['reset'] }
+  },
+  { 
+    headerName: '良品数', 
+    field: 'pass_count', 
+    width: 100, 
+    filter: 'agNumberColumnFilter',
+    filterParams: { defaultOption: 'greaterThan', buttons: ['reset'] }
+  },
   {
     headerName: '良率',
     field: 'yield_rate',
-    width: 90,
+    width: 100,
+    filter: 'agNumberColumnFilter',
+    filterParams: { defaultOption: 'greaterThan', buttons: ['reset'] },
     valueFormatter: (p: any) => p.value ? `${(p.value * 100).toFixed(2)}%` : '-',
     cellStyle: (p: any): any => {
       if (!p.value) return {}
@@ -280,25 +430,16 @@ const columnDefs: ColDef[] = [
       return { color: 'green' }
     }
   },
-  {
-      headerName: '产品名',
-      field: 'product_name',
-      width: 140,
-      cellRenderer: (p: any) => {
-          if (p.value) return p.value
-          if (!p.data) return ''
-          return `<span style="color:#1890ff;cursor:pointer" data-id="${p.data.id}" data-program="${p.data.program}">点击设置</span>`
-      },
-      onCellClicked: (p: any) => {
-          if (!p.data.program) return
-          showProductDialog(p.data)
-      }
-  },
+  { headerName: '程序名', field: 'program', width: 300, filter: 'agTextColumnFilter' },
+  { headerName: '测试机', field: 'test_machine', width: 100 },
+  { headerName: 'Data Type', field: 'data_type', width: 100 },
+
 
   {
     headerName: '状态',
     field: 'status',
     width: 90,
+    filter: false,
     cellRenderer: (p: any) => {
       const map: Record<string, string> = {
         pending: '<span style="color:#888">待处理</span>',
@@ -309,9 +450,47 @@ const columnDefs: ColDef[] = [
       return map[p.value] || p.value
     }
   },
-  { headerName: '文件大小', field: 'file_size', width: 100, valueFormatter: (p) => p.value ? formatSize(p.value) : '-' },
-  { headerName: '测试日期', field: 'test_date', width: 160, valueFormatter: (p) => p.value ? new Date(p.value).toLocaleString() : '-' },
-  { headerName: '上传日期', field: 'upload_date', width: 160, valueFormatter: (p) => p.value ? new Date(p.value).toLocaleString() : '-' },
+  { headerName: '文件大小', field: 'file_size', width: 100, filter: false, valueFormatter: (p) => p.value ? formatSize(p.value) : '-' },
+  { 
+    headerName: '测试日期', 
+    field: 'test_date', 
+    width: 150, 
+    filter: 'agDateColumnFilter',
+    filterParams: {
+      browserDatePicker: true,
+      defaultOption: 'greaterThan',
+      buttons: ['reset'],
+      comparator: (filterLocalDateAtMidnight: Date, cellValue: string) => {
+        if (cellValue == null) return -1;
+        const date = new Date(cellValue);
+        const cellDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+        if (cellDate < filterLocalDateAtMidnight) return -1;
+        if (cellDate > filterLocalDateAtMidnight) return 1;
+        return 0;
+      }
+    },
+    valueFormatter: (p) => p.value ? new Date(p.value).toLocaleDateString() : '-' 
+  },
+  { 
+    headerName: '上传日期', 
+    field: 'upload_date', 
+    width: 150, 
+    filter: 'agDateColumnFilter',
+    filterParams: {
+      browserDatePicker: true,
+      defaultOption: 'greaterThan',
+      buttons: ['reset'],
+      comparator: (filterLocalDateAtMidnight: Date, cellValue: string) => {
+        if (cellValue == null) return -1;
+        const date = new Date(cellValue);
+        const cellDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+        if (cellDate < filterLocalDateAtMidnight) return -1;
+        if (cellDate > filterLocalDateAtMidnight) return 1;
+        return 0;
+      }
+    },
+    valueFormatter: (p) => p.value ? new Date(p.value).toLocaleDateString() : '-' 
+  },
 ]
 
 function formatSize(bytes: number) {
@@ -558,6 +737,30 @@ onMounted(fetchLots)
   overflow: hidden;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
 }
+.ag-theme-alpine {
+  --ag-font-size: 13px;
+  --ag-grid-size: 4px;
+}
+:deep(.ag-header-cell-label) {
+  font-weight: 600;
+  color: #595959;
+}
+
+/* 缩小筛选框尺寸 */
+:deep(.ag-floating-filter-input) {
+  height: 24px !important;
+  min-height: 24px !important;
+}
+:deep(.ag-floating-filter-input .ag-input-field-input) {
+  padding: 0 6px !important;
+  font-size: 11px !important;
+  height: 22px !important;
+  background-color: white !important;
+  color: black !important;
+}
+:deep(.ag-floating-filter-body) {
+  height: 24px !important;
+}
 
 /* 弹窗 */
 .modal-overlay {
@@ -626,6 +829,75 @@ onMounted(fetchLots)
   background: #fff2f0;
   border: 1px solid #ffccc7;
   border-radius: 4px;
+}
+
+.check-modal {
+  width: 600px !important;
+}
+
+.param-selector {
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  height: 300px;
+}
+
+.selector-header {
+  padding: 8px;
+  border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #fafafa;
+}
+
+.search-input {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.selection-info {
+  margin-left: 12px;
+  font-size: 12px;
+  color: #1890ff;
+  font-weight: 500;
+}
+
+.param-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+}
+
+.param-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 4px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.param-item:hover {
+  background: #f5f5f5;
+}
+
+.param-item input {
+  margin: 0;
+}
+
+.param-item span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .uploading-badge {
   display: inline-flex;

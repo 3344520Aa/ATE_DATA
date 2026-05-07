@@ -108,10 +108,12 @@
         <div class="table-area">
           <ag-grid-vue
             class="ag-theme-alpine"
+            :theme="'legacy'"
             :rowData="testItems"
             :columnDefs="columnDefs"
             :defaultColDef="defaultColDef"
-            rowSelection="multiple"
+            :rowSelection="{ mode: 'multiRow', checkboxes: true, headerCheckbox: true }"
+            :selectionColumnDef="{ pinned: 'left', width: 50 }"
             :suppressRowClickSelection="true"
             style="width:100%;height:100%"
             @grid-ready="onGridReady"
@@ -166,11 +168,8 @@ const columnDefs: any[] = [
     field: 'item_number', 
     width: 90, 
     pinned: 'left',
-    checkboxSelection: true,
-    headerCheckboxSelection: true,
     filter: true,
     floatingFilter: true,
-    suppressMenu: false,
     suppressHeaderMenuButton: false,
     suppressHeaderFilterButton: false,
     floatingFilterComponentParams: { suppressFilterButton: true }
@@ -183,7 +182,6 @@ const columnDefs: any[] = [
     cellStyle: { color: '#1890ff', cursor: 'pointer' },
     filter: true,
     floatingFilter: true,
-    suppressMenu: false,
     suppressHeaderMenuButton: false,
     suppressHeaderFilterButton: false,
     floatingFilterComponentParams: { suppressFilterButton: true }
@@ -327,6 +325,9 @@ function onCellClicked(params: any) {
     }
     return;
   }
+
+  // 只有 TestItem 列才跳转
+  if (params.colDef.field !== 'item_name') return;
 
   const paramName = params.data.item_name;
   if (paramName) {
@@ -520,6 +521,10 @@ onMounted(async () => {
   border-radius: 6px;
   overflow: hidden;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+.ag-theme-alpine {
+  --ag-font-size: 13px;
+  --ag-grid-size: 4px;
 }
 
 :deep(.ag-floating-filter-button) {

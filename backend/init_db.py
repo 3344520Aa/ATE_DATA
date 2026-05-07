@@ -10,9 +10,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app.core.database import SessionLocal
 from app.models.user import User
 from app.core.security import get_password_hash
+from app.core.database import engine, Base
+import app.models # 确保模型被加载
 
 
 def create_default_admin():
+    # 创建表（如果不存在）
+    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         # Check if any user exists

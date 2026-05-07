@@ -1,59 +1,62 @@
 <template>
   <div class="bin-view">
-    <!-- LOT基本信息栏 -->
-    <div class="lot-info-bar" v-if="lotInfo">
-      <div class="info-grid">
-        <div class="info-item"><span class="label">名称</span><span class="value">{{ lotInfo.filename }}</span></div>
-        <div class="info-item"><span class="label">程序</span><span class="value">{{ lotInfo.program }}</span></div>
-        <div class="info-item"><span class="label">测试机</span><span class="value">{{ lotInfo.test_machine }}</span></div>
-        <div class="info-item"><span class="label">工位数</span><span class="value">{{ lotInfo.station_count }}</span></div>
-        <div class="info-item"><span class="label">测试数量</span><span class="value">{{ lotInfo.die_count }}</span></div>
-        <div class="info-item">
-          <span class="label">良率</span>
-          <span class="value" :style="yieldColor(lotInfo.yield_rate)">
-            {{ lotInfo.yield_rate ? (lotInfo.yield_rate * 100).toFixed(2) + '%' : '-' }}
-          </span>
+    <!-- 顶部固定栏 -->
+    <div class="sticky-header">
+      <!-- LOT基本信息栏 -->
+      <div class="lot-info-bar" v-if="lotInfo">
+        <div class="info-grid">
+          <div class="info-item"><span class="label">名称</span><span class="value">{{ lotInfo.filename }}</span></div>
+          <div class="info-item"><span class="label">程序</span><span class="value">{{ lotInfo.program }}</span></div>
+          <div class="info-item"><span class="label">测试机</span><span class="value">{{ lotInfo.test_machine }}</span></div>
+          <div class="info-item"><span class="label">工位数</span><span class="value">{{ lotInfo.station_count }}</span></div>
+          <div class="info-item"><span class="label">测试数量</span><span class="value">{{ lotInfo.die_count }}</span></div>
+          <div class="info-item">
+            <span class="label">良率</span>
+            <span class="value" :style="yieldColor(lotInfo.yield_rate)">
+              {{ lotInfo.yield_rate ? (lotInfo.yield_rate * 100).toFixed(2) + '%' : '-' }}
+            </span>
+          </div>
+          <div class="info-item"><span class="label">测试阶段</span><span class="value">{{ lotInfo.data_type }}</span></div>
+          <div class="info-item"><span class="label">测试日期</span><span class="value">{{ formatDate(lotInfo.test_date) }}</span></div>
         </div>
-        <div class="info-item"><span class="label">测试阶段</span><span class="value">{{ lotInfo.data_type }}</span></div>
-        <div class="info-item"><span class="label">测试日期</span><span class="value">{{ formatDate(lotInfo.test_date) }}</span></div>
-      </div>
-    </div>
-
-    <!-- Options栏 -->
-    <div class="options-bar">
-      <div class="opt-group">
-        <span class="opt-label">DataRange</span>
-        <label><input type="radio" v-model="options.data_range" value="final" @change="onDataRangeChange" /> Final</label>
-        <label><input type="radio" v-model="options.data_range" value="original" @change="onDataRangeChange" /> Original</label>
       </div>
 
-      <div class="opt-group">
-        <span class="opt-label">Site</span>
-        <label>
-          <input type="checkbox" :checked="isAllSiteSelected" @change="toggleAllSite" /> All
-        </label>
-        <label v-for="s in allSites" :key="s">
-          <input type="checkbox" :checked="options.selected_sites.includes(s)" @change="toggleSite(s)" />
-          Site{{ s }}
-        </label>
-      </div>
+      <!-- Options栏 -->
+      <div class="options-bar">
+        <div class="opt-group">
+          <span class="opt-label">DataRange</span>
+          <label><input type="radio" v-model="options.data_range" value="final" @change="onDataRangeChange" /> Final</label>
+          <label><input type="radio" v-model="options.data_range" value="original" @change="onDataRangeChange" /> Original</label>
+        </div>
 
-      <div class="opt-group">
-        <span class="opt-label">Map旋转</span>
-        <select v-model="options.rotate" @change="renderBinMap()" style="font-size:12px;padding:2px 6px;border:1px solid #d9d9d9;border-radius:4px">
-          <option value="0">0°</option>
-          <option value="90">90°</option>
-          <option value="180">180°</option>
-          <option value="270">270°</option>
-        </select>
-      </div>
+        <div class="opt-group">
+          <span class="opt-label">Site</span>
+          <label>
+            <input type="checkbox" :checked="isAllSiteSelected" @change="toggleAllSite" /> All
+          </label>
+          <label v-for="s in allSites" :key="s">
+            <input type="checkbox" :checked="options.selected_sites.includes(s)" @change="toggleSite(s)" />
+            Site{{ s }}
+          </label>
+        </div>
 
-      <div class="opt-group">
-        <label><input type="checkbox" v-model="options.show_yield_plot" @change="renderYieldPlot" /> Yield Plot</label>
-        <label><input type="checkbox" v-model="options.show_fail_bin" @change="renderFailBinChart" /> Fail Bin Analysis</label>
-      </div>
+        <div class="opt-group">
+          <span class="opt-label">Map旋转</span>
+          <select v-model="options.rotate" @change="renderBinMap()" style="font-size:12px;padding:2px 6px;border:1px solid #d9d9d9;border-radius:4px">
+            <option value="0">0°</option>
+            <option value="90">90°</option>
+            <option value="180">180°</option>
+            <option value="270">270°</option>
+          </select>
+        </div>
 
-      <button class="export-btn" @click="handleExport">📁 导出 Excel</button>
+        <div class="opt-group">
+          <label><input type="checkbox" v-model="options.show_yield_plot" @change="renderYieldPlot" /> Yield Plot</label>
+          <label><input type="checkbox" v-model="options.show_fail_bin" @change="renderFailBinChart" /> Fail Bin Analysis</label>
+        </div>
+
+        <button class="export-btn" @click="handleExport">📁 导出 Excel</button>
+      </div>
     </div>
 
     <!-- Bin汇总表格 -->
@@ -125,7 +128,7 @@
     <!-- 底部三栏 -->
     <div class="bottom-area">
       <!-- 左：Bin Map -->
-      <div class="map-section">
+      <div class="map-section" v-if="lotInfo?.data_type === 'CP'">
         <div class="section-title">Bin Map</div>
         <div class="map-with-legend" style="position:relative">
           <canvas ref="binMapCanvas" width="800" height="800"
@@ -162,7 +165,7 @@
     </div>
 
     <!-- 复测分析（折叠） -->
-    <div class="retest-section" v-if="hasCoords">
+    <div class="retest-section" v-if="hasCoords && lotInfo?.data_type === 'CP'">
       <div class="retest-header" @click="retestExpanded = !retestExpanded">
         <span>复测分析</span>
         <span>{{ retestExpanded ? '▲' : '▼' }}</span>
@@ -269,7 +272,7 @@ const binDetailCanvas = ref<HTMLCanvasElement>()
 let failBinChart: echarts.ECharts | null = null
 
 // Bin Map hover state
-let binMapDies: { px: number; py: number; size: number; x: number; y: number; bin: number; site: number }[] = []
+let binMapDies: { px: number; py: number; width: number; height: number; x: number; y: number; bin: number; site: number }[] = []
 
 const lotInfo = ref<any>(null)
 const binData = ref<any>({ bins: [], sites: [], all_sites: [] })
@@ -545,7 +548,7 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
   const ctx = canvas.getContext('2d')
   if (!ctx || !data.length) return
 
-  // 使用更稳健的方法计算 min/max，避免大型数组 ... 展开导致的栈溢出
+  // 计算 min/max
   let minX = Infinity, maxX = -Infinity
   let minY = Infinity, maxY = -Infinity
   for (const d of data) {
@@ -569,18 +572,65 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
     if (d.ry > rMaxY) rMaxY = d.ry
   }
 
-  const W = canvas.width, H = canvas.height, margin = 40
+  const W = canvas.width, H = canvas.height
+  const margin = 50
+  const centerX = W / 2
+  const centerY = H / 2
+  const radius = Math.min(W, H) / 2 - margin
+
   const gridW = rMaxX - rMinX + 1
   const gridH = rMaxY - rMinY + 1
   
-  // 核心修复：使用统一的 cellSize 保持长宽比，并居中显示
-  const cellSize = Math.max(1, Math.min((W - margin * 2) / gridW, (H - margin * 2) / gridH) - 1)
-  const mapWidth = gridW * (cellSize + 1)
-  const mapHeight = gridH * (cellSize + 1)
-  const offsetX = (W - mapWidth) / 2
-  const offsetY = (H - mapHeight) / 2
+  // 支持长方形 Die：分别计算 X 和 Y 方向的步长
+  const dieW = (radius * 2) / gridW
+  const dieH = (radius * 2) / gridH
+  
+  const offsetX = centerX - radius
+  const offsetY = centerY - radius
 
   ctx.clearRect(0, 0, W, H)
+
+  // 绘制 Wafer 背景圆
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, radius + 2, 0, Math.PI * 2)
+  ctx.fillStyle = '#fdfdfd'
+  ctx.fill()
+  ctx.strokeStyle = '#e0e0e0'
+  ctx.lineWidth = 1
+  ctx.stroke()
+
+  // 绘制圆周边界
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
+  ctx.strokeStyle = '#cccccc'
+  ctx.lineWidth = 2
+  ctx.stroke()
+
+  // 绘制 Notch (缺口) - 随旋转角度变化
+  let notchX = centerX, notchY = centerY + radius
+  let startAngle = Math.PI, endAngle = 0
+  
+  switch (options.value.rotate) {
+    case '90':
+      notchX = centerX - radius; notchY = centerY
+      startAngle = 1.5 * Math.PI; endAngle = 0.5 * Math.PI
+      break
+    case '180':
+      notchX = centerX; notchY = centerY - radius
+      startAngle = 0; endAngle = Math.PI
+      break
+    case '270':
+      notchX = centerX + radius; notchY = centerY
+      startAngle = 0.5 * Math.PI; endAngle = 1.5 * Math.PI
+      break
+  }
+
+  ctx.beginPath()
+  ctx.arc(notchX, notchY, 12, startAngle, endAngle)
+  ctx.fillStyle = '#ffffff'
+  ctx.fill()
+  ctx.strokeStyle = '#cccccc'
+  ctx.stroke()
 
   const coordSet = new Set(rotated.map(d => `${d.rx},${d.ry}`))
   const isEdge = (rx: number, ry: number) =>
@@ -590,49 +640,58 @@ function drawBinMap(canvas: HTMLCanvasElement, data: any[], highlightBin: number
   // 记录die位置供hover检测
   binMapDies = []
   rotated.forEach(d => {
-    const px = offsetX + (d.rx - rMinX) * (cellSize + 1)
-    const py = offsetY + (d.ry - rMinY) * (cellSize + 1)
+    const px = offsetX + (d.rx - rMinX) * dieW
+    const py = offsetY + (d.ry - rMinY) * dieH
 
     let color = ''
     if (highlightBin !== null) {
       if (d.bin === highlightBin) color = getBinColor(d.bin)
-      else if (isEdge(d.rx, d.ry)) color = 'rgba(200,200,200,0.25)'
+      else if (isEdge(d.rx, d.ry)) color = 'rgba(200,200,200,0.15)'
       else return
     } else if (singleBin !== undefined) {
       if (d.bin === singleBin) color = getBinColor(d.bin)
-      else if (isEdge(d.rx, d.ry)) color = 'rgba(200,200,200,0.25)'
+      else if (isEdge(d.rx, d.ry)) color = 'rgba(200,200,200,0.15)'
       else return
     } else {
       color = getBinColor(d.bin)
     }
 
     ctx.fillStyle = color
-    ctx.fillRect(px, py, cellSize, cellSize)
+    // 绘制 Die，留出极小的间隙以区分
+    const drawW = Math.max(0.5, dieW - 0.2)
+    const drawH = Math.max(0.5, dieH - 0.2)
+    ctx.fillRect(px, py, drawW, drawH)
 
     if (d.retest) {
-      ctx.fillStyle = 'rgba(0,0,0,0.2)'
-      const cx = px + cellSize / 2, cy = py + cellSize / 2
-      const arm = cellSize * 0.3, thick = Math.max(1, cellSize * 0.15)
+      ctx.fillStyle = 'rgba(0,0,0,0.25)'
+      const cx = px + drawW / 2, cy = py + drawH / 2
+      const arm = Math.min(drawW, drawH) * 0.35
+      const thick = Math.max(1, Math.min(drawW, drawH) * 0.1)
       ctx.fillRect(cx - thick / 2, cy - arm, thick, arm * 2)
       ctx.fillRect(cx - arm, cy - thick / 2, arm * 2, thick)
     }
 
-    // 记录位置用于hover检测（使用原始坐标x,y）
-    binMapDies.push({ px, py, size: cellSize, x: d.x, y: d.y, bin: d.bin, site: d.site })
+    // 记录位置用于hover检测
+    binMapDies.push({ px, py, width: dieW, height: dieH, x: d.x, y: d.y, bin: d.bin, site: d.site })
   })
 
   // 坐标标注
-  ctx.fillStyle = '#aaa'
-  ctx.font = `${Math.max(8, Math.min(11, cellSize))}px sans-serif`
+  ctx.fillStyle = '#999'
+  const fontSize = Math.max(8, Math.min(10, Math.min(dieW, dieH) * 0.8))
+  ctx.font = `${fontSize}px sans-serif`
   ctx.textAlign = 'center'
-  const xStep = Math.ceil(gridW / 10) || 1
+  
+  const xStep = Math.max(1, Math.ceil(gridW / 15))
   for (let rx = rMinX; rx <= rMaxX; rx += xStep) {
-    ctx.fillText(String(rx), offsetX + (rx - rMinX) * (cellSize + 1) + cellSize / 2, offsetY - 6)
+    ctx.fillText(String(rx), offsetX + (rx - rMinX) * dieW + dieW / 2, offsetY - 10)
+    ctx.fillText(String(rx), offsetX + (rx - rMinX) * dieW + dieW / 2, offsetY + radius * 2 + 15)
   }
+  
   ctx.textAlign = 'right'
-  const yStep = Math.ceil(gridH / 10) || 1
+  ctx.textBaseline = 'middle'
+  const yStep = Math.max(1, Math.ceil(gridH / 15))
   for (let ry = rMinY; ry <= rMaxY; ry += yStep) {
-    ctx.fillText(String(ry), offsetX - 6, offsetY + (ry - rMinY) * (cellSize + 1) + cellSize / 2 + 4)
+    ctx.fillText(String(ry), offsetX - 10, offsetY + (ry - rMinY) * dieH + dieH / 2)
   }
 }
 
@@ -650,7 +709,7 @@ function onBinMapMouseMove(evt: MouseEvent) {
 
   let found = null
   for (const die of binMapDies) {
-    if (mx >= die.px && mx <= die.px + die.size && my >= die.py && my <= die.py + die.size) {
+    if (mx >= die.px && mx <= die.px + die.width && my >= die.py && my <= die.py + die.height) {
       found = die
       break
     }
@@ -953,7 +1012,7 @@ async function handleExport() {
   })
 
   // 4. 添加 Map 图像和图例 (合成一张图)
-  if (binMapCanvas.value && options.value.selected_sites.length > 0) {
+  if (binMapCanvas.value && options.value.selected_sites.length > 0 && lotInfo.value?.data_type === 'CP') {
     // 获取需要显示的 Bin 图例
     const visibleBins = bins.filter((b: any) => {
       return sites.reduce((sum, s) => sum + (b.sites[`site${s}`]?.count ?? 0), 0) > 0
@@ -1050,8 +1109,21 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding: 10px; /* 增加一点内边距 */
   padding-bottom: 20px;
   width: 100%;
+}
+
+.sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: #f0f2f5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 0;
+  margin: -10px 0 0 0; /* 贴合顶部并抵消 padding */
 }
 
 .sortable {

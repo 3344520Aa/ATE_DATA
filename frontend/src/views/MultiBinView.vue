@@ -267,15 +267,46 @@ function drawMap(idx: number) {
     if (d.y < minY) minY = d.y; if (d.y > maxY) maxY = d.y
   }
 
-  const W = canvas.width, H = canvas.height, margin = 24
+  const W = canvas.width, H = canvas.height
+  const margin = 35
+  const centerX = W / 2
+  const centerY = H / 2
+  const radius = Math.min(W, H) / 2 - margin
+
   const gridW = maxX - minX + 1, gridH = maxY - minY + 1
-  const cellSize = Math.max(1, Math.min((W - margin * 2) / gridW, (H - margin * 2) / gridH) - 1)
-  const mapWidth = gridW * (cellSize + 1)
-  const mapHeight = gridH * (cellSize + 1)
-  const offsetX = (W - mapWidth) / 2
-  const offsetY = (H - mapHeight) / 2
+  
+  // 支持长方形 Die
+  const dieW = (radius * 2) / gridW
+  const dieH = (radius * 2) / gridH
+  
+  const offsetX = centerX - radius
+  const offsetY = centerY - radius
 
   ctx.clearRect(0, 0, W, H)
+
+  // 绘制 Wafer 背景圆
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, radius + 2, 0, Math.PI * 2)
+  ctx.fillStyle = '#fdfdfd'
+  ctx.fill()
+  ctx.strokeStyle = '#e8e8e8'
+  ctx.lineWidth = 1
+  ctx.stroke()
+
+  // 绘制圆周边界
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
+  ctx.strokeStyle = '#cccccc'
+  ctx.lineWidth = 1.5
+  ctx.stroke()
+
+  // 绘制 Notch (缺口)
+  ctx.beginPath()
+  ctx.arc(centerX, centerY + radius, 8, Math.PI, 0)
+  ctx.fillStyle = '#ffffff'
+  ctx.fill()
+  ctx.strokeStyle = '#cccccc'
+  ctx.stroke()
 
   const coordSet = new Set(data.map((d: any) => `${d.x},${d.y}`))
   const isEdge = (x: number, y: number) =>
@@ -284,64 +315,59 @@ function drawMap(idx: number) {
 
   const highlight = selectedBins.value[idx] ?? null
 
-  // If a global bin filter is set and this map doesn't have that bin, show only outline
+  // 如果设置了全局 Bin 过滤，且此 Map 中没有该 Bin，则仅显示轮廓
   if (highlight !== null) {
     const hasBin = data.some((d: any) => d.bin === highlight)
     if (!hasBin) {
-      // Draw empty wafer outline only
       for (const d of data) {
-        const px = offsetX + (d.x - minX) * (cellSize + 1)
-        const py = offsetY + (d.y - minY) * (cellSize + 1)
         if (isEdge(d.x, d.y)) {
-          ctx.fillStyle = 'rgba(200,200,200,0.25)'
-          ctx.fillRect(px, py, cellSize, cellSize)
+          const px = offsetX + (d.x - minX) * dieW
+          const py = offsetY + (d.y - minY) * dieH
+          ctx.fillStyle = 'rgba(200,200,200,0.15)'
+          ctx.fillRect(px, py, Math.max(0.5, dieW - 0.2), Math.max(0.5, dieH - 0.2))
         }
       }
-      // 坐标标注
-      ctx.fillStyle = '#aaa'
-      ctx.font = `${Math.max(8, Math.min(11, cellSize))}px sans-serif`
-      ctx.textAlign = 'center'
-      const xStep2 = Math.ceil(gridW / 10) || 1
-      for (let x = minX; x <= maxX; x += xStep2) {
-        ctx.fillText(String(x), offsetX + (x - minX) * (cellSize + 1) + cellSize / 2, offsetY - 6)
-      }
-      ctx.textAlign = 'right'
-      const yStep2 = Math.ceil(gridH / 10) || 1
-      for (let y = minY; y <= maxY; y += yStep2) {
-        ctx.fillText(String(y), offsetX - 6, offsetY + (y - minY) * (cellSize + 1) + cellSize / 2 + 4)
-      }
+      // 标注简单的坐标
+      drawSimpleCoords(ctx, minX, maxX, minY, maxY, offsetX, offsetY, dieW, dieH, gridW, gridH, radius)
       return
     }
   }
 
   for (const d of data) {
-    const px = offsetX + (d.x - minX) * (cellSize + 1)
-    const py = offsetY + (d.y - minY) * (cellSize + 1)
+    const px = offsetX + (d.x - minX) * dieW
+    const py = offsetY + (d.y - minY) * dieH
 
     let color: string
     if (highlight !== null) {
       if (d.bin === highlight) color = getBinColor(d.bin)
-      else if (isEdge(d.x, d.y)) color = 'rgba(200,200,200,0.25)'
+      else if (isEdge(d.x, d.y)) color = 'rgba(200,200,200,0.15)'
       else continue
     } else {
       color = getBinColor(d.bin)
     }
     ctx.fillStyle = color
-    ctx.fillRect(px, py, cellSize, cellSize)
+    ctx.fillRect(px, py, Math.max(0.5, dieW - 0.2), Math.max(0.5, dieH - 0.2))
   }
 
-  // 坐标标注
-  ctx.fillStyle = '#aaa'
-  ctx.font = `${Math.max(8, Math.min(11, cellSize))}px sans-serif`
+  drawSimpleCoords(ctx, minX, maxX, minY, maxY, offsetX, offsetY, dieW, dieH, gridW, gridH, radius)
+}
+
+function drawSimpleCoords(ctx: CanvasRenderingContext2D, minX: number, maxX: number, minY: number, maxY: number, offsetX: number, offsetY: number, dieW: number, dieH: number, gridW: number, gridH: number, radius: number) {
+  ctx.fillStyle = '#bbb'
+  const fontSize = Math.max(7, Math.min(9, Math.min(dieW, dieH) * 0.8))
+  ctx.font = `${fontSize}px sans-serif`
   ctx.textAlign = 'center'
-  const xStep = Math.ceil(gridW / 10) || 1
+  
+  const xStep = Math.max(1, Math.ceil(gridW / 10))
   for (let x = minX; x <= maxX; x += xStep) {
-    ctx.fillText(String(x), offsetX + (x - minX) * (cellSize + 1) + cellSize / 2, offsetY - 6)
+    ctx.fillText(String(x), offsetX + (x - minX) * dieW + dieW / 2, offsetY - 8)
   }
+  
   ctx.textAlign = 'right'
-  const yStep = Math.ceil(gridH / 10) || 1
+  ctx.textBaseline = 'middle'
+  const yStep = Math.max(1, Math.ceil(gridH / 10))
   for (let y = minY; y <= maxY; y += yStep) {
-    ctx.fillText(String(y), offsetX - 6, offsetY + (y - minY) * (cellSize + 1) + cellSize / 2 + 4)
+    ctx.fillText(String(y), offsetX - 8, offsetY + (y - minY) * dieH + dieH / 2)
   }
 }
 
@@ -588,7 +614,9 @@ onMounted(fetchAll)
   background: white;
   border-radius: 6px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-  overflow-x: auto;
+  overflow: auto;
+  max-height: 450px; /* 限制高度，显示约8-10行数据 */
+  flex-shrink: 0;   /* 防止在flex布局中被地图部分压缩到不可见 */
 }
 
 .export-btn {
@@ -610,7 +638,18 @@ onMounted(fetchAll)
   text-align: center;
   min-width: 60px;
 }
-.bin-table th { background: #fafafa; color: #555; }
+.bin-table th { 
+  background: #fafafa; 
+  color: #555; 
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: inset 0 -1px 0 #f0f0f0;
+}
+/* 第二行表头(Count/%) 偏移第一行的高度 */
+.bin-table thead tr:nth-child(2) th {
+  top: 27px; 
+}
 .lot-header {
   background: #e6f7ff !important;
   color: #1890ff !important;
@@ -645,6 +684,7 @@ onMounted(fetchAll)
   border-radius: 6px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
   padding: 12px;
+  flex-shrink: 0; /* 防止被压缩 */
 }
 
 .section-title {

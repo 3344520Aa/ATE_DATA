@@ -87,7 +87,7 @@
             <label>Chart</label>
             <label><input type="checkbox" :checked="currentTab?.options.show_histogram" @change="updateOption('show_histogram', ($event.target as HTMLInputElement).checked)" /> Histogram</label>
             <label><input type="checkbox" :checked="currentTab?.options.show_scatter" @change="updateOption('show_scatter', ($event.target as HTMLInputElement).checked)" /> Scatter</label>
-            <label><input type="checkbox" :checked="currentTab?.options.show_map" @change="updateOption('show_map', ($event.target as HTMLInputElement).checked)" /> Map Chart</label>
+            <label v-if="lotInfo?.data_type === 'CP'"><input type="checkbox" :checked="currentTab?.options.show_map" @change="updateOption('show_map', ($event.target as HTMLInputElement).checked)" /> Map Chart</label>
           </div>
         </div>
       </div>
@@ -144,7 +144,7 @@
           </div>
 
           <!-- Wafer Map -->
-          <div v-if="currentTab.options.show_map && currentTab.data" class="chart-container" style="flex-direction:column;align-items:center">
+          <div v-if="currentTab.options.show_map && currentTab.data && lotInfo?.data_type === 'CP'" class="chart-container" style="flex-direction:column;align-items:center">
             <div style="position:relative">
               <canvas
                 :ref="el => setChartRef(currentTab?.id, 'wafer', el)"
@@ -217,7 +217,7 @@ const hiddenSites = ref<Set<number>>(new Set())
 
 // Wafer map state per tab (for hit-testing on hover)
 const waferMapState: Record<string, {
-  dies: { px: number; py: number; size: number; dieX: number; dieY: number; val: number; site: number, lvl: number }[]
+  dies: { px: number; py: number; width: number; height: number; dieX: number; dieY: number; val: number; site: number, lvl: number }[]
   canvasEl: HTMLCanvasElement | null
   legendBlocks?: { lvl: number, x: number, y: number, w: number, h: number }[]
   activeLevel?: number | null
@@ -414,7 +414,7 @@ function onWaferMouseMove(tabId: string, evt: MouseEvent) {
 
   let found: typeof state.dies[0] | null = null
   for (const d of state.dies) {
-    if (mx >= d.px && mx <= d.px + d.size && my >= d.py && my <= d.py + d.size) {
+    if (mx >= d.px && mx <= d.px + d.width && my >= d.py && my <= d.py + d.height) {
       found = d
       break
     }
@@ -1183,22 +1183,54 @@ function renderWaferMap(tabId: string, canvas: HTMLCanvasElement) {
   const LEGEND_TOTAL_W = LEGEND_RANGE_W + LEGEND_BLOCK_W + LEGEND_COUNT_W + 8
   const W = canvas.width
   const H = canvas.height
-  const margin = 30
+  const margin = 40
+  
+  // 地图区域中心
   const mapAreaW = W - LEGEND_TOTAL_W - margin * 2
+  const centerX = mapAreaW / 2 + margin
+  const centerY = H / 2
+  const radius = Math.min(mapAreaW, H - margin * 2) / 2
+
   const gridW = maxX - minX + 1
   const gridH = maxY - minY + 1
-  const cellSize = Math.max(1, Math.min(mapAreaW / gridW, (H - margin * 2) / gridH) - 1)
-  const mapWidth = gridW * (cellSize + 1)
-  const mapHeight = gridH * (cellSize + 1)
-  const offsetX = (mapAreaW - mapWidth) / 2 + margin
-  const offsetY = (H - mapHeight) / 2
+  
+  // 支持长方形 Die
+  const dieW = (radius * 2) / gridW
+  const dieH = (radius * 2) / gridH
+  
+  const offsetX = centerX - radius
+  const offsetY = centerY - radius
+
+  // 绘制 Wafer 背景圆
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, radius + 2, 0, Math.PI * 2)
+  ctx.fillStyle = '#fdfdfd'
+  ctx.fill()
+  ctx.strokeStyle = '#e0e0e0'
+  ctx.lineWidth = 1
+  ctx.stroke()
+
+  // 绘制圆周边界
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
+  ctx.strokeStyle = '#cccccc'
+  ctx.lineWidth = 2
+  ctx.stroke()
+
+  // 绘制 Notch (缺口)
+  ctx.beginPath()
+  ctx.arc(centerX, centerY + radius, 12, Math.PI, 0)
+  ctx.fillStyle = '#ffffff'
+  ctx.fill()
+  ctx.strokeStyle = '#cccccc'
+  ctx.stroke()
 
   // 绘制底图所有测试过的die (浅灰色背景)
   ctx.fillStyle = '#f5f5f5'
   allCoords.forEach((d: any) => {
-    const px = offsetX + (d.x - minX) * (cellSize + 1)
-    const py = offsetY + (d.y - minY) * (cellSize + 1)
-    ctx.fillRect(px, py, cellSize, cellSize)
+    const px = offsetX + (d.x - minX) * dieW
+    const py = offsetY + (d.y - minY) * dieH
+    ctx.fillRect(px, py, Math.max(0.5, dieW - 0.2), Math.max(0.5, dieH - 0.2))
   })
 
   // 统计每个色阶die数量
@@ -1207,27 +1239,27 @@ function renderWaferMap(tabId: string, canvas: HTMLCanvasElement) {
     levelCounts[valToLevel(d.val, minVal, maxVal, NUM_COLOR_LEVELS)]++
   })
 
-  // 绘制die，记录位置供hover检测
+  // 绘制有效die，记录位置供hover检测
   const dies: typeof waferMapState[string]['dies'] = []
   const activeLevel = waferMapState[tabId]?.activeLevel
 
   validData.forEach(d => {
     const lvl = valToLevel(d.val, minVal, maxVal, NUM_COLOR_LEVELS)
     
-    // 如果有选中的色阶且当前die不在此色阶，跳过绘制（显示为底层浅灰）
+    // 如果有选中的色阶且当前die不在此色阶，跳过绘制
     if (activeLevel != null && lvl !== activeLevel) return
 
-    const px = offsetX + (d.x - minX) * (cellSize + 1)
-    const py = offsetY + (d.y - minY) * (cellSize + 1)
+    const px = offsetX + (d.x - minX) * dieW
+    const py = offsetY + (d.y - minY) * dieH
     
     ctx.fillStyle = levelToColor(lvl, NUM_COLOR_LEVELS)
-    ctx.fillRect(px, py, cellSize, cellSize)
-    dies.push({ px, py, size: cellSize, dieX: d.x, dieY: d.y, val: d.val, site: d.site, lvl })
+    ctx.fillRect(px, py, Math.max(0.5, dieW - 0.2), Math.max(0.5, dieH - 0.2))
+    dies.push({ px, py, width: dieW, height: dieH, dieX: d.x, dieY: d.y, val: d.val, site: d.site, lvl })
   })
   if (waferMapState[tabId]) waferMapState[tabId].dies = dies
 
   // ── 绘制图例（三列：range | 色块 | count）────────────
-  const legendStartX = mapAreaW + margin + 4
+  const legendStartX = mapAreaW + margin + margin
   const legendTopY = margin
   const totalLegendH = H - margin * 2
   const blockH = Math.floor(totalLegendH / NUM_COLOR_LEVELS)

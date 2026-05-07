@@ -12,7 +12,7 @@
           <span class="icon">📋</span>
           <span v-if="!collapsed" class="label">数据列表</span>
         </RouterLink>
-        <RouterLink to="/analysis" class="menu-item">
+        <RouterLink to="/" class="menu-item" :class="{ 'router-link-active': $route.path.startsWith('/lot') }">
           <span class="icon">📊</span>
           <span v-if="!collapsed" class="label">数据分析</span>
         </RouterLink>
@@ -215,7 +215,7 @@ function handleLogout() {
 
 .content {
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
   padding: 0;
 }
 

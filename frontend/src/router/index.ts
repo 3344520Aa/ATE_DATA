@@ -59,6 +59,11 @@ const router = createRouter({
           name: 'multi-bin',
           component: () => import('@/views/MultiBinView.vue'),
         },
+        {
+          path: 'lot/:id/idle-check',
+          name: 'idle-check',
+          component: () => import('@/views/IdleCheckView.vue'),
+        },
       ],
     },
   ],
