@@ -79,10 +79,26 @@ def get_test_items_summary(
         # 计算统计
         stats = calc_param_stats(filtered_values, ll, ul, exec_qty)
         
+        # 寻找第一个失效的 Bin
+        first_fail_bin = None
+        if stats.get('fail_count', 0) > 0 and 'SOFT_BIN' in df.columns:
+            # 找到失效的掩码。注意这里的 ll, ul 已经是最终用于统计的限制（可能受 sigma 影响）
+            item_vals = df[item.item_name]
+            # 这里的判断逻辑与 calc_param_stats 保持一致
+            fail_mask = (item_vals.notna()) & (
+                ((item_vals < ll) if ll is not None else False) | 
+                ((item_vals > ul) if ul is not None else False)
+            )
+            # 找到第一个 True 的索引标签
+            if fail_mask.any():
+                first_idx = fail_mask.idxmax()
+                first_fail_bin = int(df.loc[first_idx, 'SOFT_BIN'])
+
         result.append({
             "id": item.id,
             "item_number": item.item_number,
             "item_name": item.item_name,
+            "first_fail_bin": first_fail_bin,
             "unit": item.unit,
             "lower_limit": ll,
             "upper_limit": ul,
@@ -239,7 +255,7 @@ def run_export_task(
             df_stats = pd.DataFrame(items_summary)
             if not df_stats.empty:
                 column_mapping = {
-                    'item_number': '#', 'item_name': 'TestItem', 'lower_limit': 'L.Limit',
+                    'item_number': '#', 'first_fail_bin': 'Bin', 'item_name': 'TestItem', 'lower_limit': 'L.Limit',
                     'upper_limit': 'U.Limit', 'unit': 'Units', 'min_val': 'Min',
                     'max_val': 'Max', 'exec_qty': 'Exec Qty', 'fail_count': 'Failures',
                     'fail_rate': 'Fail Rate', 'yield_rate': 'Yield', 'mean': 'Mean',
@@ -296,9 +312,10 @@ def run_export_task(
                 
                 # 设置列宽
                 stats_sheet.set_column(0, 0, 8)   # #
-                stats_sheet.set_column(1, 1, 40)  # TestItem 40宽
-                if num_cols > 2:
-                    stats_sheet.set_column(2, num_cols - 1, 12) # 其余居中
+                stats_sheet.set_column(1, 1, 8)   # Bin
+                stats_sheet.set_column(2, 2, 40)  # TestItem 40宽
+                if num_cols > 3:
+                    stats_sheet.set_column(3, num_cols - 1, 12) # 其余居中
 
 
             export_tasks[task_id]["progress"] = 15
@@ -730,7 +747,7 @@ def export_test_items(
         df_stats = pd.DataFrame(items_summary)
         if not df_stats.empty:
             column_mapping = {
-                'item_number': '#', 'item_name': 'TestItem', 'lower_limit': 'L.Limit',
+                'item_number': '#', 'first_fail_bin': 'Bin', 'item_name': 'TestItem', 'lower_limit': 'L.Limit',
                 'upper_limit': 'U.Limit', 'unit': 'Units', 'min_val': 'Min',
                 'max_val': 'Max', 'exec_qty': 'Exec Qty', 'fail_count': 'Failures',
                 'fail_rate': 'Fail Rate', 'yield_rate': 'Yield', 'mean': 'Mean',
@@ -788,9 +805,10 @@ def export_test_items(
             
             # 设置列宽
             stats_sheet.set_column(0, 0, 8)   # #
-            stats_sheet.set_column(1, 1, 40)  # TestItem 40宽
-            if num_cols > 2:
-                stats_sheet.set_column(2, num_cols - 1, 12) # 其余居中
+            stats_sheet.set_column(1, 1, 8)   # Bin
+            stats_sheet.set_column(2, 2, 40)  # TestItem 40宽
+            if num_cols > 3:
+                stats_sheet.set_column(3, num_cols - 1, 12) # 其余居中
 
 
         # ─── Sheet 2: Histograms ───
@@ -2505,11 +2523,12 @@ def get_multi_lot_bin_summary(
             row["lots"][str(lot.id)] = {
                 "count": b.count if b else 0,
                 "pct": b.percentage if b else 0.0,
+                "comment": b.comment if b else "",
             }
         rows.append(row)
 
     return {
-        "lots": [{"id": l.id, "filename": l.filename, "lot_id": l.lot_id, "wafer_id": l.wafer_id} for l in ordered_lots],
+        "lots": [{"id": l.id, "filename": l.filename, "lot_id": l.lot_id, "wafer_id": l.wafer_id, "product_name": l.product_name} for l in ordered_lots],
         "bins": rows,
     }
 

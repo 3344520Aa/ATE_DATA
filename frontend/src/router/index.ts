@@ -32,7 +32,7 @@ const router = createRouter({
         {
           path: 'reports',
           name: 'reports',
-          component: () => import('@/views/HomeView.vue'),
+          component: () => import('@/views/ReportCenterView.vue'),
         },
         {
           path: 'settings',

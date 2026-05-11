@@ -44,7 +44,7 @@
             <span class="value">{{ formatDate(lotInfo.test_date) }}</span>
         </div>
         <div class="info-item-actions">
-          <button class="btn-bin" @click="router.push(`/lot/${lotId}/bin`)">📊 BIN分析</button>
+          <button class="btn-bin" @click="openBinAnalysis">📊 BIN分析</button>
           <button 
             class="btn-bin" 
             :disabled="exporting" 
@@ -136,6 +136,11 @@ const route = useRoute()
 const router = useRouter()
 const lotId = ref<number>(Number(route.params.id))
 
+const openBinAnalysis = () => {
+  const url = router.resolve(`/lot/${lotId.value}/bin`).href
+  window.open(url, '_blank')
+}
+
 const lotInfo = ref<any>(null)
 const testItems = ref<any[]>([])
 const itemCount = ref(0)
@@ -169,6 +174,22 @@ const columnDefs: any[] = [
     width: 90, 
     pinned: 'left',
     filter: true,
+    floatingFilter: true,
+    suppressHeaderMenuButton: false,
+    suppressHeaderFilterButton: false,
+    floatingFilterComponentParams: { suppressFilterButton: true }
+  },
+  {
+    headerName: 'Bin',
+    field: 'first_fail_bin',
+    width: 70,
+    pinned: 'left',
+    cellStyle: { fontWeight: 'bold', color: '#f5222d' },
+    filter: 'agNumberColumnFilter',
+    filterParams: {
+      filterOptions: ['equals', 'lessThan', 'greaterThan'],
+      defaultOption: 'equals',
+    },
     floatingFilter: true,
     suppressHeaderMenuButton: false,
     suppressHeaderFilterButton: false,

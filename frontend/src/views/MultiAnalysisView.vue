@@ -35,7 +35,8 @@
             {{ averageYield ? (averageYield * 100).toFixed(2) + '%' : '-' }}
           </span>
         </div>
-        <div class="info-item-actions">
+        <div class="info-item-actions" style="display: flex; gap: 12px;">
+          <button class="btn-export" @click="openMultiBin">📊 BIN分析</button>
           <button 
             class="btn-export" 
             :disabled="exporting" 
@@ -108,6 +109,11 @@ import api from '@/api'
 const route = useRoute()
 const router = useRouter()
 const lotIdsStr = route.query.lot_ids as string
+
+const openMultiBin = () => {
+  const url = router.resolve(`/multi-bin?lot_ids=${lotIdsStr}`).href
+  window.open(url, '_blank')
+}
 
 const lots = ref<any[]>([])
 const params = ref<any[]>([])
@@ -447,7 +453,7 @@ onMounted(fetchData)
 }
 
 .info-item-actions {
-  margin-left: auto;
+  margin-left: 24px;
 }
 
 .btn-export {

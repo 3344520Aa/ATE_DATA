@@ -88,6 +88,7 @@
             <label><input type="checkbox" :checked="currentTab?.options.show_histogram" @change="updateOption('show_histogram', ($event.target as HTMLInputElement).checked)" /> Histogram</label>
             <label><input type="checkbox" :checked="currentTab?.options.show_scatter" @change="updateOption('show_scatter', ($event.target as HTMLInputElement).checked)" /> Scatter</label>
             <label v-if="lotInfo?.data_type === 'CP'"><input type="checkbox" :checked="currentTab?.options.show_map" @change="updateOption('show_map', ($event.target as HTMLInputElement).checked)" /> Map Chart</label>
+            <button v-if="lotInfo?.data_type === 'CP'" class="btn-vs" :class="{ active: vsMode }" @click="toggleVsMode">VS</button>
           </div>
         </div>
       </div>
@@ -152,10 +153,9 @@
                 height="600"
                 style="width:820px;height:600px;display:block"
               ></canvas>
-              <!-- Tooltip: pure DOM, no Vue reactivity -->
               <div ref="waferTooltipEl" class="wafer-tooltip" style="display:none"></div>
+              <div ref="leftLinkedTooltipEl" class="wafer-tooltip wafer-linked-tooltip" style="display:none"></div>
             </div>
-            <!-- Site图例（下方，点击切换显示/隐藏） -->
             <div class="wafer-legend" v-if="currentTab.data">
               <span
                 v-for="(s, idx) in currentTab.data.sites.filter((s:any) => s.site > 0)"
@@ -171,22 +171,110 @@
           </div>
         </div>
 
-        <!-- Pass Bin 表（右侧） -->
-        <div class="bin-table">
-          <div class="bin-title">Pass Bin</div>
-          <table v-if="binSummary">
-            <thead>
-              <tr><th>Bin</th><th>Name</th><th>Count</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="b in binSummary" :key="b.bin_number">
-                <td>{{ b.bin_number }}</td>
-                <td>{{ b.bin_name }}</td>
-                <td>{{ b.all_site_count }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <!-- VS Right Panel -->
+        <template v-if="vsMode && vsTab">
+          <div class="vs-separator"><span>VS</span></div>
+          <div class="vs-right-panel">
+            <!-- VS mini options bar -->
+            <div class="vs-opts-bar">
+              <div class="nav-group">
+                <button @click="vsPrevParam">◀ PREV</button>
+                <select v-model="vsParamName" @change="onVsParamChange">
+                  <option v-for="item in paramList" :key="item.item_name" :value="item.item_name">
+                    {{ item.item_number }}:{{ item.item_name }}
+                  </option>
+                </select>
+                <button @click="vsNextParam">NEXT ▶</button>
+              </div>
+              <div class="option-item">
+                <label>Filter</label>
+                <select :value="vsTab.options.filter_type" @change="updateVsFilterType(($event.target as HTMLSelectElement).value)">
+                  <option value="all">All Data</option>
+                  <option value="robust">Robust Data</option>
+                  <option value="filter_by_limit">Filter By Limit</option>
+                  <option value="filter_by_sigma">Filter by Sigma</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+              <div class="option-item" v-if="vsTab.options.filter_type === 'filter_by_sigma'">
+                <label>Sigma</label>
+                <input v-model.number="vsSigmaInput" type="number" step="0.5" min="1" max="6" style="width:60px" />
+                <button @click="applyVsSigma">Apply</button>
+              </div>
+              <div class="option-item">
+                <label>DataRange</label>
+                <label><input type="radio" :checked="vsTab.options.data_range === 'final'" @change="updateVsOption('data_range','final')" /> Final</label>
+                <label><input type="radio" :checked="vsTab.options.data_range === 'original'" @change="updateVsOption('data_range','original')" /> Original</label>
+                <label><input type="radio" :checked="vsTab.options.data_range === 'all'" @change="updateVsOption('data_range','all')" /> All</label>
+              </div>
+              <div class="option-item">
+                <label>Chart</label>
+                <label><input type="checkbox" :checked="vsTab.options.show_histogram" @change="updateVsOption('show_histogram', ($event.target as HTMLInputElement).checked)" /> Histogram</label>
+                <label><input type="checkbox" :checked="vsTab.options.show_scatter" @change="updateVsOption('show_scatter', ($event.target as HTMLInputElement).checked)" /> Scatter</label>
+                <label v-if="lotInfo?.data_type === 'CP'"><input type="checkbox" :checked="vsTab.options.show_map" @change="updateVsOption('show_map', ($event.target as HTMLInputElement).checked)" /> Map Chart</label>
+              </div>
+            </div>
+            <!-- VS stats table -->
+            <div class="stats-table" v-if="vsTab.data">
+              <table>
+                <thead>
+                  <tr>
+                    <th>SITE</th><th>Passes</th><th>Failures</th><th>Exec Qty</th><th>Yield</th>
+                    <th>Limit_L</th><th>Limit_H</th><th>Min</th><th>Max</th><th>Mean</th><th>Stdev</th><th>CPK</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="s in vsTab.data.sites" :key="s.site">
+                    <td>{{ s.site === 0 ? 'ALL' : `Site${s.site}` }}</td>
+                    <td>{{ s.stats.exec_qty - s.stats.fail_count }}</td>
+                    <td>{{ s.stats.fail_count }}</td>
+                    <td>{{ s.stats.exec_qty }}</td>
+                    <td>{{ s.stats.yield_rate ? (s.stats.yield_rate * 100).toFixed(2) + '%' : '-' }}</td>
+                    <td>{{ vsTab.data.lower_limit?.toFixed(4) ?? '-' }}</td>
+                    <td>{{ vsTab.data.upper_limit?.toFixed(4) ?? '-' }}</td>
+                    <td>{{ s.stats.min_val?.toFixed(4) ?? '-' }}</td>
+                    <td>{{ s.stats.max_val?.toFixed(4) ?? '-' }}</td>
+                    <td>{{ s.stats.mean?.toFixed(4) ?? '-' }}</td>
+                    <td>{{ s.stats.stdev?.toFixed(4) ?? '-' }}</td>
+                    <td :style="cpkColor(s.stats.cpk)">{{ s.stats.cpk?.toFixed(4) ?? '-' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <!-- VS Histogram -->
+            <div v-if="vsTab.options.show_histogram && vsTab.data" class="chart-container">
+              <div :ref="el => setChartRef(VS_TAB_ID, 'hist', el)" style="width:600px;height:400px"></div>
+            </div>
+            <!-- VS Scatter -->
+            <div v-if="vsTab.options.show_scatter && vsTab.data" class="chart-container">
+              <div :ref="el => setChartRef(VS_TAB_ID, 'scatter', el)" style="width:800px;height:260px"></div>
+            </div>
+            <!-- VS Wafer Map -->
+            <div v-if="vsTab.options.show_map && vsTab.data && lotInfo?.data_type === 'CP'" class="chart-container" style="flex-direction:column;align-items:center">
+              <div style="position:relative">
+                <canvas
+                  :ref="el => setChartRef(VS_TAB_ID, 'wafer', el)"
+                  width="820" height="600"
+                  style="width:820px;height:600px;display:block"
+                ></canvas>
+                <div ref="vsWaferTooltipEl" class="wafer-tooltip" style="display:none"></div>
+                <div ref="vsLinkedTooltipEl" class="wafer-tooltip wafer-linked-tooltip" style="display:none"></div>
+              </div>
+              <div class="wafer-legend" v-if="vsTab.data">
+                <span
+                  v-for="(s, idx) in vsTab.data.sites.filter((s:any) => s.site > 0)"
+                  :key="s.site"
+                  class="wafer-legend-item"
+                  :class="{ hidden: vsHiddenSites.has(s.site) }"
+                  @click="toggleVsSite(s.site)"
+                >
+                  <span class="wafer-legend-dot" :style="{ background: SITE_COLORS[idx % SITE_COLORS.length] }"></span>
+                  Site{{ s.site }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -204,13 +292,23 @@ const initialParam = ref(decodeURIComponent(route.params.param as string))
 
 const lotInfo = ref<any>(null)
 const paramList = ref<any[]>([])
-const binSummary = ref<any[]>([])
 const currentParamName = ref(initialParam.value)
 const activeTab = ref('')
 const tabCounter = ref(0)
 
-// Wafer tooltip DOM ref (直接操作DOM，不用Vue响应式，避免触发全局重渲染)
+// VS mode
+const VS_TAB_ID = '__vs__'
+const vsMode = ref(false)
+const vsTab = ref<Tab | null>(null)
+const vsParamName = ref('')
+const vsSigmaInput = ref(3)
+const vsHiddenSites = ref<Set<number>>(new Set())
+
+// Tooltip DOM refs
 const waferTooltipEl = ref<HTMLDivElement | null>(null)
+const leftLinkedTooltipEl = ref<HTMLDivElement | null>(null)
+const vsWaferTooltipEl = ref<HTMLDivElement | null>(null)
+const vsLinkedTooltipEl = ref<HTMLDivElement | null>(null)
 
 // 隐藏的Site集合（响应式，用于图例点击切换，仅重绘wafer canvas）
 const hiddenSites = ref<Set<number>>(new Set())
@@ -318,11 +416,139 @@ function toggleSite(siteNum: number) {
   if (s.has(siteNum)) s.delete(siteNum)
   else s.add(siteNum)
   hiddenSites.value = s
-  // 只重绘wafer，不触发hist/scatter
   if (currentTab.value) {
     const key = `${currentTab.value.id}_wafer`
     const canvas = chartInstances[key]
     if (canvas) renderWaferMap(currentTab.value.id, canvas)
+  }
+}
+
+function toggleVsSite(siteNum: number) {
+  const s = new Set(vsHiddenSites.value)
+  if (s.has(siteNum)) s.delete(siteNum)
+  else s.add(siteNum)
+  vsHiddenSites.value = s
+  const canvas = chartInstances[`${VS_TAB_ID}_wafer`]
+  if (canvas) renderWaferMap(VS_TAB_ID, canvas)
+}
+
+// helper: get tab by id (supports VS pseudo-tab)
+function getTabById(tabId: string): Tab | null {
+  if (tabId === VS_TAB_ID) return vsTab.value
+  return tabs.value.find(t => t.id === tabId) ?? null
+}
+
+// VS mode toggle
+function toggleVsMode() {
+  if (vsMode.value) {
+    vsMode.value = false
+    vsTab.value = null
+    // cleanup VS chart instances
+    Object.keys(chartInstances).filter(k => k.startsWith(VS_TAB_ID)).forEach(k => {
+      if (chartInstances[k]?.dispose) chartInstances[k].dispose()
+      delete chartInstances[k]
+    })
+    if (waferMapState[VS_TAB_ID]) {
+      if (waferMapState[VS_TAB_ID].canvasEl) {
+        waferMapState[VS_TAB_ID].canvasEl!.onmousemove = null
+        waferMapState[VS_TAB_ID].canvasEl!.onmouseleave = null
+        waferMapState[VS_TAB_ID].canvasEl!.onclick = null
+      }
+      delete waferMapState[VS_TAB_ID]
+    }
+  } else {
+    vsMode.value = true
+    const src = currentTab.value
+    vsParamName.value = src?.param_name ?? ''
+    vsSigmaInput.value = src?.options?.sigma ?? 3
+    vsHiddenSites.value = new Set()
+    vsTab.value = {
+      id: VS_TAB_ID,
+      title: 'VS',
+      item_number: src?.item_number ?? '',
+      param_name: src?.param_name ?? '',
+      options: src ? JSON.parse(JSON.stringify(src.options)) : { ...draftOptions.value },
+      data: null,
+    }
+    loadVsData()
+  }
+}
+
+async function loadVsData() {
+  if (!vsTab.value) return
+  const data = await fetchParamData(vsTab.value.param_name, vsTab.value.options)
+  vsTab.value.data = data
+  await nextTick()
+  renderVsCharts()
+}
+
+function renderVsCharts() {
+  renderHistogram(VS_TAB_ID)
+  renderScatter(VS_TAB_ID)
+  const canvas = chartInstances[`${VS_TAB_ID}_wafer`]
+  if (canvas) renderWaferMap(VS_TAB_ID, canvas)
+}
+
+async function updateVsOption(key: string, value: any) {
+  if (!vsTab.value) return
+  vsTab.value.options[key] = value
+  await loadVsData()
+}
+
+async function updateVsFilterType(value: string) {
+  if (!vsTab.value) return
+  vsTab.value.options.filter_type = value
+  if (value !== 'filter_by_sigma') vsSigmaInput.value = 3
+  await loadVsData()
+}
+
+function applyVsSigma() {
+  if (!vsTab.value) return
+  vsTab.value.options.sigma = vsSigmaInput.value
+  loadVsData()
+}
+
+function onVsParamChange() {
+  if (!vsTab.value) return
+  vsTab.value.param_name = vsParamName.value
+  const paramItem = paramList.value.find((p: any) => p.item_name === vsParamName.value)
+  vsTab.value.item_number = paramItem?.item_number ?? ''
+  loadVsData()
+}
+
+function vsPrevParam() {
+  const idx = paramList.value.findIndex((p: any) => p.item_name === vsParamName.value)
+  if (idx > 0) { vsParamName.value = paramList.value[idx - 1].item_name; onVsParamChange() }
+}
+
+function vsNextParam() {
+  const idx = paramList.value.findIndex((p: any) => p.item_name === vsParamName.value)
+  if (idx < paramList.value.length - 1) { vsParamName.value = paramList.value[idx + 1].item_name; onVsParamChange() }
+}
+
+// Show a linked tooltip on the OTHER map when a die is clicked
+function showLinkedDieTip(targetTabId: string, dieX: number, dieY: number) {
+  const state = waferMapState[targetTabId]
+  const tooltipEl = targetTabId === VS_TAB_ID ? vsLinkedTooltipEl.value : leftLinkedTooltipEl.value
+  if (!tooltipEl || !state?.canvasEl) return
+
+  const die = state.dies.find(d => d.dieX === dieX && d.dieY === dieY)
+  if (die) {
+    const rect = state.canvasEl.getBoundingClientRect()
+    const scaleX = rect.width / state.canvasEl.width
+    const scaleY = rect.height / state.canvasEl.height
+    const tipX = (die.px + die.width / 2) * scaleX + 8
+    const tipY = (die.py + die.height / 2) * scaleY + 8
+    tooltipEl.innerHTML = `<div>X: ${die.dieX}, Y: ${die.dieY}</div><div>Val: ${die.val.toFixed(6)}</div><div>Site: ${die.site}</div>`
+    tooltipEl.style.display = 'block'
+    tooltipEl.style.left = tipX + 'px'
+    tooltipEl.style.top = tipY + 'px'
+  } else {
+    tooltipEl.innerHTML = `<div>X: ${dieX}, Y: ${dieY}</div><div>No data</div>`
+    tooltipEl.style.display = 'block'
+    // position at center roughly
+    tooltipEl.style.left = '20px'
+    tooltipEl.style.top = '20px'
   }
 }
 
@@ -349,8 +575,8 @@ function setChartRef(tabId: string | undefined, type: string, el: any) {
       el.onmousemove = (evt: MouseEvent) => onWaferMouseMove(tabId, evt)
       el.onclick = (evt: MouseEvent) => onWaferClick(tabId, evt)
       el.onmouseleave = () => {
-        // 直接操作DOM，不触发Vue响应式
-        if (waferTooltipEl.value) waferTooltipEl.value.style.display = 'none'
+        const tipEl = tabId === VS_TAB_ID ? vsWaferTooltipEl.value : waferTooltipEl.value
+        if (tipEl) tipEl.style.display = 'none'
       }
       nextTick(() => renderWaferMap(tabId, el))
     } else {
@@ -387,10 +613,11 @@ function onWaferClick(tabId: string, evt: MouseEvent) {
   const mx = (evt.clientX - rect.left) * scaleX
   const my = (evt.clientY - rect.top) * scaleY
 
+  // Check legend block click first
   for (const b of state.legendBlocks) {
     if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
       if (state.activeLevel === b.lvl) {
-        state.activeLevel = null // click again to restore
+        state.activeLevel = null
       } else {
         state.activeLevel = b.lvl
       }
@@ -399,11 +626,29 @@ function onWaferClick(tabId: string, evt: MouseEvent) {
       return
     }
   }
+
+  // VS linkage: click a die to show linked tooltip on the other map
+  if (vsMode.value) {
+    let clickedDie: typeof state.dies[0] | null = null
+    for (const d of state.dies) {
+      if (mx >= d.px && mx <= d.px + d.width && my >= d.py && my <= d.py + d.height) {
+        clickedDie = d
+        break
+      }
+    }
+    if (clickedDie) {
+      const otherTabId = tabId === VS_TAB_ID ? (currentTab.value?.id ?? '') : VS_TAB_ID
+      // hide previous linked tooltip on same side
+      const myLinkedTip = tabId === VS_TAB_ID ? leftLinkedTooltipEl.value : vsLinkedTooltipEl.value
+      if (myLinkedTip) myLinkedTip.style.display = 'none'
+      showLinkedDieTip(otherTabId, clickedDie.dieX, clickedDie.dieY)
+    }
+  }
 }
 
 function onWaferMouseMove(tabId: string, evt: MouseEvent) {
   const state = waferMapState[tabId]
-  const tooltipEl = waferTooltipEl.value
+  const tooltipEl = tabId === VS_TAB_ID ? vsWaferTooltipEl.value : waferTooltipEl.value
   if (!state?.canvasEl || !tooltipEl) return
 
   const rect = state.canvasEl.getBoundingClientRect()
@@ -420,7 +665,6 @@ function onWaferMouseMove(tabId: string, evt: MouseEvent) {
     }
   }
 
-  // 直接操作DOM，完全绕开Vue响应式，不触发重渲染
   if (found) {
     tooltipEl.innerHTML = `<div>X: ${found.dieX}, Y: ${found.dieY}</div><div>Val: ${found.val.toFixed(6)}</div><div>Site: ${found.site}</div>`
     tooltipEl.style.display = 'block'
@@ -433,11 +677,6 @@ function onWaferMouseMove(tabId: string, evt: MouseEvent) {
 
 async function fetchParamList() {
   paramList.value = await api.get(`/analysis/lot/${lotId.value}/items`, { params: { site: 0 } })
-}
-
-async function fetchBinSummary() {
-  const data: any = await api.get(`/analysis/lot/${lotId.value}/bin_summary`)
-  binSummary.value = data.bins
 }
 
 async function fetchLotInfo() {
@@ -495,7 +734,7 @@ function addTab() {
 }
 
 async function loadTabData(tabId: string) {
-  const tab = tabs.value.find(t => t.id === tabId)
+  const tab = getTabById(tabId)
   if (!tab) return
   const data = await fetchParamData(tab.param_name, tab.options)
   tab.data = data
@@ -677,7 +916,7 @@ function buildTicks(xMin: number, xMax: number, count: number): number[] {
 
 // ── 直方图渲染 ─────────────────────────────────────────
 function renderHistogram(tabId: string) {
-  const tab = tabs.value.find(t => t.id === tabId)
+  const tab = getTabById(tabId)
   if (!tab?.data) return
   const chart = chartInstances[`${tabId}_hist`]
   if (!chart) return
@@ -998,7 +1237,7 @@ function renderHistogram(tabId: string) {
 
 // ── Scatter渲染 ────────────────────────────────────────
 function renderScatter(tabId: string) {
-  const tab = tabs.value.find(t => t.id === tabId)
+  const tab = getTabById(tabId)
   if (!tab?.data) return
   const chart = chartInstances[`${tabId}_scatter`]
   if (!chart) return
@@ -1120,13 +1359,14 @@ function valToLevel(val: number, minVal: number, maxVal: number, levels: number)
 }
 
 function renderWaferMap(tabId: string, canvas: HTMLCanvasElement) {
-  const tab = tabs.value.find(t => t.id === tabId)
+  const tab = getTabById(tabId)
   if (!tab?.data) return
 
-  // 只收集未被隐藏的site数据
+  // 只收集未被隐藏的site数据（VS tab 使用独立的 vsHiddenSites）
+  const hiddenSet = tabId === VS_TAB_ID ? vsHiddenSites.value : hiddenSites.value
   const siteDataMap: Map<number, any[]> = new Map()
   tab.data.sites.forEach((s: any) => {
-    if (s.site > 0 && s.wafer_map && !hiddenSites.value.has(s.site)) {
+    if (s.site > 0 && s.wafer_map && !hiddenSet.has(s.site)) {
       siteDataMap.set(s.site, s.wafer_map)
     }
   })
@@ -1342,7 +1582,6 @@ function formatDate(d: string) {
 
 onMounted(async () => {
   await fetchParamList()
-  await fetchBinSummary()
   await fetchLotInfo()
   addTab()
 })
@@ -1549,9 +1788,67 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 
-.bin-table { width: 200px; flex-shrink: 0; }
-.bin-title { font-size: 12px; font-weight: 600; color: #333; margin-bottom: 6px; }
-.bin-table table { width: 100%; border-collapse: collapse; font-size: 11px; }
-.bin-table th, .bin-table td { border: 1px solid #f0f0f0; padding: 3px 6px; }
-.bin-table th { background: #fafafa; }
+/* VS button */
+.option-item .btn-vs {
+  padding: 3px 12px;
+  background: #52c41a;
+  color: #fff;
+  border: 2px solid #389e0d;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  transition: background 0.15s, border-color 0.15s;
+  line-height: 1.6;
+}
+.option-item .btn-vs:hover { background: #73d13d; border-color: #52c41a; }
+.option-item .btn-vs.active { background: #135200; border-color: #092b00; color: #fff; }
+
+/* VS separator */
+.vs-separator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  writing-mode: vertical-rl;
+  padding: 12px 4px;
+}
+.vs-separator span {
+  background: #52c41a;
+  color: white;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 5px;
+  border-radius: 4px;
+  letter-spacing: 2px;
+}
+
+/* VS right panel */
+.vs-right-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* VS mini options bar */
+.vs-opts-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #f0f0f0;
+  padding-bottom: 10px;
+  background: #f9fff5;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #b7eb8f;
+}
+
+/* Linked tooltip (VS cross-map tooltip) */
+.wafer-linked-tooltip {
+  border: 2px solid #52c41a;
+  background: rgba(0, 50, 0, 0.82) !important;
+}
 </style>

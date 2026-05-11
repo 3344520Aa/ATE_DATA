@@ -55,6 +55,7 @@
           <label><input type="checkbox" v-model="options.show_fail_bin" @change="renderFailBinChart" /> Fail Bin Analysis</label>
         </div>
 
+        <button class="export-btn" @click="openParamAnalysis">📈 参数分析</button>
         <button class="export-btn" @click="handleExport">📁 导出 Excel</button>
       </div>
     </div>
@@ -255,14 +256,20 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import api from '@/api'
 import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
 
 const route = useRoute()
+const router = useRouter()
 const lotId = ref(Number(route.params.id))
+
+const openParamAnalysis = () => {
+  const url = router.resolve(`/lot/${lotId.value}`).href
+  window.open(url, '_blank')
+}
 
 const binMapCanvas = ref<HTMLCanvasElement>()
 const binMapTooltipEl = ref<HTMLDivElement | null>(null)
@@ -1160,7 +1167,6 @@ onMounted(async () => {
 .opt-label { color: #666; font-weight: 500; white-space: nowrap; }
 
 .export-btn {
-  margin-left: 100px;
   background: #52c41a;
   color: white;
   border: none;

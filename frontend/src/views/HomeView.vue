@@ -454,7 +454,7 @@ const columnDefs: ColDef[] = [
   { 
     headerName: '测试日期', 
     field: 'test_date', 
-    width: 150, 
+    width: 180, 
     filter: 'agDateColumnFilter',
     filterParams: {
       browserDatePicker: true,
@@ -469,12 +469,12 @@ const columnDefs: ColDef[] = [
         return 0;
       }
     },
-    valueFormatter: (p) => p.value ? new Date(p.value).toLocaleDateString() : '-' 
+    valueFormatter: (p) => formatDateTime(p.value)
   },
   { 
     headerName: '上传日期', 
     field: 'upload_date', 
-    width: 150, 
+    width: 180, 
     filter: 'agDateColumnFilter',
     filterParams: {
       browserDatePicker: true,
@@ -489,7 +489,7 @@ const columnDefs: ColDef[] = [
         return 0;
       }
     },
-    valueFormatter: (p) => p.value ? new Date(p.value).toLocaleDateString() : '-' 
+    valueFormatter: (p) => formatDateTime(p.value)
   },
 ]
 
@@ -497,6 +497,20 @@ function formatSize(bytes: number) {
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
   return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+function formatDateTime(val: any) {
+  if (!val) return '-'
+  const d = new Date(val)
+  if (isNaN(d.getTime())) return '-'
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  const Y = d.getFullYear()
+  const M = pad(d.getMonth() + 1)
+  const D = pad(d.getDate())
+  const h = pad(d.getHours())
+  const m = pad(d.getMinutes())
+  const s = pad(d.getSeconds())
+  return `${Y}-${M}-${D} ${h}:${m}:${s}`
 }
 
 async function fetchLots() {
